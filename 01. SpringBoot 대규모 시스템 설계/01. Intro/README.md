@@ -76,3 +76,55 @@ ___
 - 프로그램은 이미지로 패키징되고, 컨테이너로 실행된다.
   - 이미지 : 실행파일
   - 컨테이너 : 실행된 프로세스,이미지, 독립적이고 격리된 실행 환경
+ 
+
+
+<br>
+
+### 6. 프로젝트 세팅
+___
+- java 21 , Spring boot 3.3.2 Gradle
+- dependency : Spring Web, Lombok
+- 멀티 모듈 구조 사용 : 프로젝트를 여러 개의 독립적인 모듈로 분리하여 개발
+  - 각 모듈마다 설정들을 지정 , appprojects 로 감싸주면 모든 모듈에 똑같이 설정
+```yaml
+allprojects {
+    repositories {
+        mavenCentral()
+    }
+
+    dependencies {
+        implementation 'org.springframework.boot:spring-boot-starter-web'
+
+        compileOnly 'org.projectlombok:lombok'
+        annotationProcessor 'org.projectlombok:lombok'
+
+        //테스트에서 lombok 사용
+        testCompileOnly 'org.projectlombok:lombok'
+        testAnnotationProcessor 'org.projectlombok:lombok'
+
+        testImplementation 'org.springframework.boot:spring-boot-starter-test'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+
+    tasks.named('test') {
+        useJUnitPlatform()
+    }
+}
+```
+- src 제거 후 common(공통 코드 관리), service(microservice) 디렉토리 생성
+- service 밑에 하위 모듈 생성, article 에만 build.gradle 웹의존성 추가
+```yaml
+dependencies {
+  implementation 'org.springframework.boot:spring-boot-starter-web'
+}
+```
+- setting.gradle
+```yaml
+include 'common'
+include 'service'
+include 'service:article'
+```
+
+- service 밑에 article 생성 후 src, main, test 등 프로젝트에 필요한것 생성 
+- article, comment, like, view, hot-article, article-read 프로젝트 복사
