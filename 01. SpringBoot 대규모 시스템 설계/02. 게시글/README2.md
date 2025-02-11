@@ -354,3 +354,227 @@ public class ArticleApiTest {
 }
 
 ```
+
+- PageLimitCalculator.java 테스트
+```java
+class PageLimitCalculatorTest {
+
+    @Test
+    void calculatePageLimitTest() {
+        calculatePageLimitTest(1L, 30L, 10L, 301L);
+        calculatePageLimitTest(7L, 30L, 10L, 301L);
+        calculatePageLimitTest(10L, 30L, 10L, 301L);
+        calculatePageLimitTest(11L, 30L, 10L, 601L);
+        calculatePageLimitTest(12L, 30L, 10L, 601L);
+    }
+
+    void calculatePageLimitTest(Long page, Long pageSize, Long movablePageCount, Long expected) {
+        Long result = PageLimitCalculator.calculatePageLimit(page, pageSize, movablePageCount);
+        assertThat(result).isEqualTo(expected);
+
+    }
+}
+```
+
+<br>
+
+### 10. 게시글 목록 API - 무한 스크롤 설계
+___
+- 무한 스크롤 : 스크롤을 내리면 다음 데이터 조회, 주로 모바일 환경에서 사용, 페이지 번호 방식 XX
+```text 
+페이징 번호 방식을 사용하면 보여진 데이터가 삭제되거나 데이터가 추가가 되면 데이터가 중복/누락 될 수 있다.
+마지막으로 불러온 데이터가 기준점이 되야한다.
+정확한 데이터 기준점이 있기 떄문에 인덱스에서 로그 시간에 기준점을 찾을 수 있다.
+1. 첫 페이지를 조회한 Client는 마지막 조회한 데이터의 기준점을 알고 있다.
+2. 다음 페이지를 불러올 때 마지막 조회한 데이터의 기준점을 파라미터로 전달한다면?
+3. 데이터베이스에서는 기준점으로 쿼리를 수행한다.
+    • 이 때, 기준점에 생성된 인덱스를 통해 로그 시간에 접근할 수 있다.
+    • 즉, offset만큼 scan하는 과정이 필요하지 않다. limit 개수를 즉시 추출할 수 있다.
+    • 따라서, 아무리 뒷 페이지로 가더라도, 균등한 속도를 보장할 수 있다.
+```
+```sql
+# 1번 페이지
+select * from article
+where board_id = {board_id}
+order by article_id desc limit 30;
+# 2번 페이지 이상, 기준점 = {last_article_id}
+select * from article
+where board_id = {board_id} and article_id < {last_article_id}
+order by article_id desc limit 30;
+```
+- select * from article where board_id = 1 order by article_id desc limit 30;
+- select * from article where board_id = 1 and article_id < 147555803545141852 order by article_id desc limit 30;
+- select article_id from article where board_id = 1 order by article_id asc limit 1 offset 30; // 마지막 페이지의 기준점
+- select * from article where board_id = 1 and article_id < 147550439382646804 order by article_id desc limit 30;
+- 기준점을 인덱스에서 로그 시간에 즉시 찾을 수 있으므로, 아무리 뒷 페이지를 가더라도 균등한 조회 속도가 보장되는 것이다.
+
+<br>
+
+### 11. 게시글 목록 API - 무한 스크롤 설계
+___
+- repository 에 무한스크롤 게시물 조회 쿼리 생성 (1번페이지일때, 2번페이지 이상일때)
+```java
+@Repository
+public interface ArticleRepository extends JpaRepository<Article, Long> {
+    // 1번 페이지
+    @Query(
+            value = "select article.article_id, article.title, article.content, article.board_id, article.writer_id, " +
+                    "article.created_at, article.modified_at " +
+                    "from article " +
+                    "where board_id = :boardId " +
+                    "order by article_id desc limit :limit",
+            nativeQuery = true
+    )
+    List<Article> findAllInfiniteScroll(@Param("boardId") Long boardId, @Param("limit") Long limit);
+
+    // 2번 페이지 이상
+    @Query(
+            value = "select article.article_id, article.title, article.content, article.board_id, article.writer_id, " +
+                    "article.created_at, article.modified_at " +
+                    "from article " +
+                    "where board_id = :boardId and article_id < :lastArticleId  " +
+                    "order by article_id desc limit :limit",
+            nativeQuery = true
+    )
+    List<Article> findAllInfiniteScroll(
+            @Param("boardId") Long boardId,
+            @Param("limit") Long limit,
+            @Param("lastArticleId") Long lastArticleId
+            );
+}
+```
+- repository Test
+```java
+@Slf4j
+@SpringBootTest
+class ArticleRepositoryTest {
+    @Autowired
+    ArticleRepository articleRepository;
+    @Test
+    void findInfiniteScrollTest() {
+        List<Article> articles = articleRepository.findAllInfiniteScroll(1L, 30L);
+        for (Article article : articles) {
+            log.info("articleId = {}", article.getArticleId());
+        }
+
+        Long lastArticleId = articles.getLast().getArticleId();
+
+        List<Article> articles2 = articleRepository.findAllInfiniteScroll(1L, 30L, lastArticleId);
+        for (Article article : articles2) {
+            log.info("articleId2 = {}", article.getArticleId());
+        }
+    }
+}
+```
+
+- service 생성
+```java
+@Service
+@RequiredArgsConstructor
+public class ArticleService {
+    private final Snowflake snowflake = new Snowflake();
+    private final ArticleRepository articleRepository;
+
+    public List<ArticleResponse> readAllInfiniteScroll(Long boardId, Long pageSize, Long lastArticleId) {
+        List<Article> articles = lastArticleId == null ?
+                articleRepository.findAllInfiniteScroll(boardId, pageSize) :
+                articleRepository.findAllInfiniteScroll(boardId, pageSize, lastArticleId);
+        return articles.stream().map(ArticleResponse::from).toList();
+    }
+}
+```
+- controller 생성
+```java
+@RestController
+@RequiredArgsConstructor
+public class ArticleController {
+    private final ArticleService articleService;
+
+    @GetMapping("/v1/articles/infinite-scroll")
+    public List<ArticleResponse> readAllInfiniteScroll(
+            @RequestParam("boardId") Long boardId,
+            @RequestParam("pageSize") Long pageSize,
+            @RequestParam(value = "lastArticleId", required = false) Long lastArticleId
+    ) {
+        return articleService.readAllInfiniteScroll(boardId, pageSize, lastArticleId);
+    }
+
+}
+```
+
+- test 작성
+```java
+public class ArticleApiTest {
+    RestClient restClient = RestClient.create("http://localhost:9000");    // http 요청 할 수 있는 클래스
+
+    @Test
+    void readAllInfiniteScrollTest() {
+        List<ArticleResponse> articles1 = restClient.get()
+                .uri("/v1/articles/infinite-scroll?boardId=1&pageSize=5")
+                .retrieve()
+                .body(new ParameterizedTypeReference<List<ArticleResponse>>() {
+                });// 리스트로 반환이기 때문에 ParameterizedTypeReference 사용
+
+        System.out.println("first Page");
+        for (ArticleResponse articleResponse : articles1) {
+            System.out.println("articleId = " + articleResponse.getArticleId());
+        }
+
+        Long lastArticleId = articles1.getLast().getArticleId();
+
+        List<ArticleResponse> articles2 = restClient.get()
+                .uri("/v1/articles/infinite-scroll?boardId=1&pageSize=5&lastArticleId=%s".formatted(lastArticleId))
+                .retrieve()
+                .body(new ParameterizedTypeReference<List<ArticleResponse>>() {
+                });
+
+        System.out.println("second Page");
+        for (ArticleResponse articleResponse : articles2) {
+            System.out.println("articleId = " + articleResponse.getArticleId());
+        }
+    }
+}
+```
+
+<br>
+
+### 12. Primary Key 생성 전략
+___
+#### DB auto_increment
+- 분산 데이터베이스 환경에서 PK가 중복될 수 있기 때문에, 식별자의 유일성이 보장되지 않는다.
+  - 여러 샤드에서 동일한 PK를 가지는 상황
+- 클라이언트 측에 노출하면 보안 문제
+- 간단한 장점이 있어서 보안적인 문제를 크게 고려하지 않는 상황, 단일 DB를 사용하거나 애플리케이션에서 PK의 중복을 직접 구분하는 상황 사용
+- 보안이 필요하면, PK는 데이터베이스 내에서의 식별자로만 사용하고, 애플리케이션에서의 식별자를 위해 별도 유니크 인덱스를 사용할 수도 있다.
+  - PK = id(DB auto_increment), unique index = article_id(UUID 등), Client는 article_id만 식별자로서 노출 및 사용
+  - 별도의 식별자를 사용하면 Secondary Index로 포인터 찾은 후, Clustered Index로 데이터 접근하므로, 조회 비용 증가한다.
+
+<br> 
+
+#### 유니크 문자열 또는 숫자 
+- UUID 또는 난수를 생성하여 PK를 지정할 수 있다.
+  - 키 생성 방식이 간단, 정렬데이터가 아닌 랜덤데이터를 삽입
+- 랜덤 데이터로 인해 성능 저하가 발생할 수 있다.
+  - Clustered Index는 정렬된 상태를 유지한다.
+  - 데이터 삽입 필요한 인덱스 페이지가 가득 찼다면, B+ tree 재구성 및 페이지 분할로 디스크 I/O 증가
+  - PK를 이용한 범위 조회가 필요하다면, 디스크에서 랜덤 I/O가 발생하기 때문에, 순차 I/O보다 성능 저하
+
+<br>
+
+#### 유니크 정렬 문자열
+- 분산 환경에 대한 PK 중복 문제 해결, 보안 문제 해결, 랜덤 데이터에 의한 성능 문제 해결
+- UUID v7, ULID 등의 알고리즘
+  - 일반적으로 알려진 알고리즘은 128비트를 사용한다.
+- 데이터 크기에 따라, 공간 및 성능 효율이 달라진다.
+- Clustered Index는 PK를 기준으로 만들어진다.
+- Secondary Index는 데이터에 접근할 수 있는 포인터를 가진다. => 즉, PK를 가지고 있다.
+- PK가 크면 클수록, 데이터는 더 많은 공간을 차지, 비교 연산에 의한 정렬/조회에 더 많은 비용 소모
+
+<br>
+
+#### 
+- 분산 환경에 대한 PK 중복 문제 해결, 보안 문제 해결, 랜덤 데이터에 의한 성능 문제 해결
+- Snowflake, TSID 등의 알고리즘
+  - 64비트를 사용한다. (BIGINT)
+  - 정렬을 위해 타임스탬프를 나타내는 비트 수의 제한으로, 키 생성을 위한 시간적인 한계가 있을 수 있다. 문자열 알고리즘에서도 동일한 문제 있으나 비트 수가 많을수록 제한이 덜할 수 있다.
+- 문자열 방식보다 적은 공간을 사용한다.
