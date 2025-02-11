@@ -106,3 +106,273 @@ ___
 
 - common(공통 모듈 하위) 에 Snowflake 생성
 
+<br>
+
+### 5. 게시글 CRUD API 구현
+___
+- article 에 jpa, mysql, snowflake 모듈 dependency 추가
+```yaml
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    runtimeOnly 'com.mysql:mysql-connector-j'
+    implementation project(':common:snowflake')
+}
+```
+- application.yml 에 spring name, DB, jpa 설정 추가
+```yaml
+spring:
+  application:
+    name: hello-board-article-service
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/article
+    username: root
+    password: root
+  jpa:
+    database-platform: org.hibernate.dialect.MySQLDialect
+    open-in-view: false
+    show-sql: true
+    hibernate:
+      ddl-auto: none
+```
+<br>
+
+- Article Entity 생성, create, update 함수도 만들어놈
+```java
+@Table(name = "article")
+@Getter
+@Entity
+@ToString
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+public class Article {
+    @Id
+    private Long articleId;
+    private String title;
+    private String content;
+    private Long boardId;   // shard key
+    private Long writerId;
+    private LocalDateTime createdAt;
+    private LocalDateTime modifiedAt;
+
+    // 팩토리 메서드
+    public static Article create(Long articleId, String title, String content, Long boardId, Long writerId) {
+        Article article = new Article();
+        article.articleId = articleId;
+        article.title = title;
+        article.content = content;
+        article.boardId = boardId;
+        article.writerId = writerId;
+        article.createdAt = LocalDateTime.now();
+        article.modifiedAt = article.createdAt;
+        
+        return article;
+    }
+    
+    public void update(String title, String content) {
+        this.title = title;
+        this.content = content;
+        modifiedAt = LocalDateTime.now();
+    }
+}
+```
+
+<br>
+
+- ArticleRepository.java 생성
+```java
+@Repository
+public interface ArticleRepository extends JpaRepository<Article, Long> {
+}
+```
+
+- Article 요청, 응답을 위한 request(create, update), response 객체 
+```java
+@Getter
+@ToString
+public class ArticleCreateRequest {
+
+    private String title;
+    private String content;
+    private Long writerId;
+    private Long boardId;
+}
+```
+```java
+@Getter
+@ToString
+public class ArticleUpdateRequest {
+    private String title;
+    private String content;
+}
+```
+```java
+@Getter
+@ToString
+public class ArticleResponse {
+    private Long articleId;
+    private String title;
+    private String content;
+    private Long boardId;
+    private Long writerId;
+    private LocalDateTime createdAt;
+    private LocalDateTime modifiedAt;
+
+    public static ArticleResponse from(Article article) {   // 팩토리 매서드
+        ArticleResponse response = new ArticleResponse();
+        response.articleId = article.getArticleId();
+        response.title = article.getTitle();
+        response.content = article.getContent();
+        response.boardId = article.getBoardId();
+        response.writerId = article.getWriterId();
+        response.createdAt = article.getCreatedAt();
+        response.modifiedAt = article.getModifiedAt();
+        return response;
+    }
+}
+```
+
+<br>
+
+- Service
+```java
+@Service
+@RequiredArgsConstructor
+public class ArticleService {
+    private final Snowflake snowflake = new Snowflake();
+    private final ArticleRepository articleRepository;
+
+    @Transactional
+    public ArticleResponse create(ArticleCreateRequest request) {
+        Article article = articleRepository.save(
+                Article.create(snowflake.nextId(), request.getTitle(), request.getContent(), request.getBoardId(), request.getWriterId())
+        );
+        return ArticleResponse.from(article);
+    }
+
+    @Transactional
+    public ArticleResponse update(Long articleId, ArticleUpdateRequest request) {
+        Article article = articleRepository.findById(articleId).orElseThrow();  // 데이터가 없으면 예외 발생
+        article.update(request.getTitle(), request.getContent());
+
+        return ArticleResponse.from(article);
+    }
+
+    public ArticleResponse read(Long articleId) {
+        return ArticleResponse.from(articleRepository.findById(articleId).orElseThrow());
+    }
+
+    @Transactional
+    public void delete(Long articleId) {
+        articleRepository.deleteById(articleId);
+    }
+}
+```
+
+<br>
+
+- controller
+```java
+@RestController
+@RequiredArgsConstructor
+public class ArticleController {
+    private final ArticleService articleService;
+
+    @GetMapping("/v1/articles/{articleId}")
+    public ArticleResponse read(@PathVariable Long articleId) {
+        return articleService.read(articleId);
+    }
+
+    @PostMapping("/v1/articles")
+    public ArticleResponse create(@RequestBody ArticleCreateRequest request) {
+        return articleService.create(request);
+    }
+
+    @PutMapping("/v1/articles/{articleId}")
+    public ArticleResponse update(@PathVariable Long articleId, @RequestBody ArticleUpdateRequest request) {
+        return articleService.update(articleId, request);
+    }
+
+    @DeleteMapping("/v1/articles/{articleId}")
+    public void delete(@PathVariable Long articleId) {
+        articleService.delete(articleId);
+    }
+}
+```
+
+<br>
+
+- Test 코드 작성
+```java
+public class ArticleApiTest {
+    RestClient restClient = RestClient.create("http://localhost:9000");    // http 요청 할 수 있는 클래스
+
+    @Test
+    void createTest() {
+        ArticleResponse response = create(new ArticleCreateRequest(
+                "h1", "my content", 1L, 1L
+        ));
+
+        System.out.println(response);
+    }
+
+    ArticleResponse create(ArticleCreateRequest request) {
+        return restClient.post()
+                .uri("/v1/articles")
+                .body(request)
+                .retrieve() // 호출
+                .body(ArticleResponse.class);
+    }
+
+    @Test
+    void readTest() {
+        ArticleResponse response = read(147543046302195712L);   // create 에서 생성된 ID
+        System.out.println("response = " + response);
+    }
+
+    ArticleResponse read(Long articleId) {
+        return restClient.get()
+                .uri("/v1/articles/{articleId}", articleId)
+                .retrieve()
+                .body(ArticleResponse.class);
+    }
+
+    @Test
+    void updateTest() {
+        update(147543046302195712L);
+        ArticleResponse response = read(147543046302195712L);
+        System.out.println("response = " + response);
+    }
+
+    void update(Long articleId) {
+        restClient.put()
+                .uri("/v1/articles/{articleId}", articleId)
+                .body(new ArticleUpdateRequest("h2 2", "my content 2222"))
+                .retrieve();
+    }
+
+    @Test
+    void deleteTest() {
+        restClient.delete()
+                .uri("/v1/articles/147543046302195712")
+                .retrieve();
+    }
+
+    @Getter
+    @AllArgsConstructor
+    static class ArticleCreateRequest {
+        private String title;
+        private String content;
+        private Long writerId;
+        private Long boardId;
+    }
+
+    @Getter
+    @AllArgsConstructor
+    static class ArticleUpdateRequest {
+        private String title;
+        private String content;
+    }
+}
+
+```
