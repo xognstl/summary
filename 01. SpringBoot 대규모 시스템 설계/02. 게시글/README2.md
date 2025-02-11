@@ -333,3 +333,24 @@ public class ArticleController {
 
 }
 ```
+
+- test 추가
+```java
+public class ArticleApiTest {
+    RestClient restClient = RestClient.create("http://localhost:9000");    // http 요청 할 수 있는 클래스
+
+    @Test
+    void readAllTest() {
+        ArticlePageResponse response = restClient.get()
+                .uri("/v1/articles?boardId=1&pageSize=30&page=1")
+                .retrieve()
+                .body(ArticlePageResponse.class);
+
+        System.out.println("response.getArticleCount() = " + response.getArticleCount());
+        for (ArticleResponse article : response.getArticles()) {
+            System.out.println("articleId = " + article.getArticleId());
+        }
+    }
+}
+
+```
