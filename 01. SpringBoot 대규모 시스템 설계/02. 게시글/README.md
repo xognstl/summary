@@ -92,11 +92,17 @@ create table article (
   modified_at datetime not null
 );
 ```
+<br>
 
+### 4. Snowflake 
+___
 #### Primary Key 선택
 - 오름차순 유니크 숫자를 애플리케이션에서 직접 생성
   - AUTO_INCREMENT , UUID 사용 XX
   - 분산 시스템과 인덱스의 구조에 대한 이해가 필요하기 때문에 뒤에서 ..
 - 오름차순 유니크 숫자를 만들기 위한 알고리즘 : Snowflake, TSID 등등
 - Snowflake : 분산 환경에서도 중복 없이 순차적 ID 생성하기 위한 규칙, 유니크, 시간 기반 순차성, 분산 환경에서의 높은 성능
+
+
+- common(공통 모듈 하위) 에 Snowflake 생성
 
