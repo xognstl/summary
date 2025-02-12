@@ -385,3 +385,30 @@ public class CommentApiTest {
     }
 }
 ```
+
+<br>
+
+### 3. 댓글 최대 2 depth - 테스트 데이터 삽입
+___
+- 게시글에서 한거 처럼 멀티스레드 이용해서 1200만건의 테스트 데이터 삽입 insert 부분만 변경
+```java
+@SpringBootTest
+public class DataInitializer {
+    void insert() {
+        transactionTemplate.executeWithoutResult(status -> {
+            Comment prev = null;
+            for (int i = 0; i < BULK_INSERT_SIZE; i++) {
+                Comment comment = Comment.create(
+                        snowflake.nextId(),
+                        "content",
+                        i % 2 == 0 ? null : prev.getCommentId(),
+                        1L,
+                        1L
+                );// 짝수 일때 상위 댓글 X, 홀수 일땐 이전댓글이 상위 댓글로 되게
+                prev = comment;
+                entityManager.persist(comment);
+            }
+        });
+    }
+}
+```
