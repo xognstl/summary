@@ -56,3 +56,206 @@ select * from comment
     order by parent_comment_id asc, comment_id asc
     limit {limit};
 ```
+
+<br>
+
+### 5. 댓글 최대 2 depth - 목록 API 구현
+- repository N번페이지 M개 글 조회, 댓글 개수 조회 , 무한스크롤 1페이지, 2페이지 이상에 대한 쿼리 작성
+```java
+@Repository
+public interface CommentRepository extends JpaRepository<Comment, Long> {
+    // N번 페이지에서 M개의 댓글 조회
+    @Query(
+            value = "select comment.comment_id, comment.content, comment.parent_commentId, comment.article_id, " +
+                    "comment.writer_id, comment.deleted, comment.created_at " +
+                    "from (" +
+                    "   select comment_id from comment where article_id :articleId  " +
+                    "   order by parent_comment_id asc, comment_id asc  " +
+                    "   limit :limit offset :offset " +
+                    ") t left join comment on t.comment_id = comment.comment_id" ,
+            nativeQuery = true
+    )
+    List<Comment> findAll(
+            @Param("articleId") Long articleId,
+            @Param("offset") Long offset,
+            @Param("limit") Long limit
+    );
+
+    //댓글 개수 조회
+    @Query(
+            value = "select count(*) from (" +
+                    "   select comment_id from comment where article_id = :articleId limit :limit" +
+                    ") t",
+            nativeQuery = true
+    )
+    Long count(
+        @Param("articleId") Long articleId,
+        @Param("limit") Long limit
+    );
+
+    // 무한 스크롤 1번 페이지
+    @Query(
+            value = "select comment.comment_id, comment.content, comment.parent_comment_id, comment.article_id, " +
+                    "comment.writer_id, comment.deleted, comment.created_at " +
+                    "from comment   " +
+                    "where article_id = :articleId " +
+                    "order by parent_comment_id asc, comment_id asc  " +
+                    "limit :limit",
+            nativeQuery = true
+    )
+    List<Comment> findAllInfiniteScroll(
+            @Param("articleId") Long articleId,
+            @Param("limit") Long limit
+    );
+
+    // 무한 스크롤 2번 페이지 이상
+    @Query(
+            value = "select comment.comment_id, comment.content, comment.parent_comment_id, comment.article_id, " +
+                    "comment.writer_id, comment.deleted, comment.created_at " +
+                    "from comment   " +
+                    "where article_id = :articleId and (" +
+                    "   parent_comment_id > :lastParentCommentId or" +
+                    "   (parent_comment_id = :lastParentCommentId and comment_id > :lastCommentId)" +
+                    ")" +
+                    "order by parent_comment_id asc, comment_id asc  " +
+                    "limit :limit",
+            nativeQuery = true
+    )
+    List<Comment> findAllInfiniteScroll(
+            @Param("articleId") Long articleId,
+            @Param("lastParentCommentId") Long lastParentCommentId,
+            @Param("lastCommentId") Long lastCommentId,
+            @Param("limit") Long limit
+    );
+}
+```
+
+- CommentPageResponse 페이지 생성, article 에서 사용했던 PageLimitCalculator.java 가저오기
+```java
+@Getter
+public class CommentPageResponse {
+    private List<Comment> comments;
+    private Long commentCount;
+
+    private static CommentPageResponse of(List<Comment> comments, Long commentCount) {
+        CommentPageResponse response = new CommentPageResponse();
+        response.comments = comments;
+        response.commentCount = commentCount;
+        return response;
+    }
+}
+```
+
+- service 생성
+```java
+@Service
+@RequiredArgsConstructor
+public class CommentService {
+    private final Snowflake snowflake = new Snowflake();
+    private final CommentRepository commentRepository;
+
+    public CommentPageResponse readAll(Long articleId, Long page, Long pageSize) {
+        return CommentPageResponse.of(
+                commentRepository.findAll(articleId, (page - 1) * pageSize, pageSize).stream()
+                        .map(CommentResponse::from)
+                        .toList(),
+                commentRepository.count(articleId, PageLimitCalculator.calculatePageLimit(page, pageSize, 10L))
+        );
+    }
+
+    // 무한 스크롤
+    public List<CommentResponse> readAll(Long articleId, Long lastParentCommentId, Long lastCommentId, Long limit) {
+        List<Comment> comments = lastParentCommentId == null || lastCommentId == null ?
+                commentRepository.findAllInfiniteScroll(articleId, limit) :
+                commentRepository.findAllInfiniteScroll(articleId, lastParentCommentId, lastCommentId, limit);
+        return comments.stream().map(CommentResponse::from).toList();
+    }
+}
+```
+- controller
+```java
+@RestController
+@RequiredArgsConstructor
+public class CommentController {
+    private final CommentService commentService;
+
+    @GetMapping("/v1/comments")
+    public CommentPageResponse readAll(
+            @RequestParam("articleId") Long articleId,
+            @RequestParam("page") Long page,
+            @RequestParam("pageSize") Long pageSize
+    ) {
+        return commentService.readAll(articleId, page, pageSize);
+    }
+
+    @GetMapping("/v1/comments/infinite-scroll")
+    public List<CommentResponse> readAll(
+            @RequestParam("articleId") Long articleId,
+            @RequestParam(value = "lastParentCommentId", required = false) Long lastParentCommentId,
+            @RequestParam(value = "lastCommentId", required = false) Long lastCommentId,
+            @RequestParam("pageSize") Long pageSize
+    ) {
+        return commentService.readAll(articleId, lastParentCommentId, lastCommentId, pageSize);
+    }
+}
+```
+
+- test 1페이지 readAll 과 readAllInfiniteScroll의 결과 값은 같다.
+```java
+public class CommentApiTest {
+
+    RestClient restClient = RestClient.create("http://localhost:9001");
+
+    @Test
+    void readAll() {
+        CommentPageResponse response = restClient.get()
+                .uri("/v1/comments?articleId=1&page=1&pageSize=10")
+                .retrieve()
+                .body(CommentPageResponse.class);
+
+        System.out.println("response.getCommentCount() = " + response.getCommentCount());
+        for (CommentResponse comment : response.getComments()) {
+            if (!comment.getCommentId().equals(comment.getParentCommentId())) {
+                System.out.print("\t");
+            }
+            System.out.println("comment.getCommentId() = " + comment.getCommentId());
+        }
+
+    }
+
+
+    @Test
+    void readAllInfiniteScroll() {
+        List<CommentResponse> response1 = restClient.get()
+                .uri("v1/comments/infinite-scroll?articleId=1&pageSize=5")
+                .retrieve()
+                .body(new ParameterizedTypeReference<List<CommentResponse>>() {
+                });
+        System.out.println("first page");
+        for (CommentResponse comment : response1) {
+            if (!comment.getCommentId().equals(comment.getParentCommentId())) {
+                System.out.print("\t");
+            }
+            System.out.println("comment.getCommentId() = " + comment.getCommentId());
+        }
+
+        Long lastParentCommentId = response1.getLast().getParentCommentId();
+        Long lastCommentId = response1.getLast().getCommentId();
+
+        List<CommentResponse> response2 = restClient.get()
+                .uri("v1/comments/infinite-scroll?articleId=1&pageSize=5&lastParentCommentId%s&lastCommentId=%s"
+                        .formatted(lastParentCommentId, lastCommentId))
+                .retrieve()
+                .body(new ParameterizedTypeReference<List<CommentResponse>>() {
+                });
+        System.out.println("second page");
+        for (CommentResponse comment : response1) {
+            if (!comment.getCommentId().equals(comment.getParentCommentId())) {
+                System.out.print("\t");
+            }
+            System.out.println("comment.getCommentId() = " + comment.getCommentId());
+        }
+    }
+
+}
+```
