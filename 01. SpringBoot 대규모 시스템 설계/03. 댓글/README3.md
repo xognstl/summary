@@ -130,3 +130,585 @@ select * from comment_v2
   order by path asc
     limit {limit};
 ```
+
+### 7. 댓글 무한 depth - CUD API 구현 & 테스트 데이터 삽입
+___
+- 경로 path 컬럼 값 관련 Embeddable, 여러개의 필드를 하나의 객체로 만들고 싶을때 @Embeddable, @Embedded 사용
+```java
+@Getter
+@ToString
+@Embeddable
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+public class CommentPath {
+    private String path;
+
+    // path 가 가질 수 있는 characterSet
+    private static final String CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    private static final int DEPTH_CHUNK_SIZE = 5;  // 경로정보 depth 당 5개
+    private static final int MAX_DEPTH = 5; // 최대 depth
+
+    // MIN_CHUNK = 00000, MAX_CHUNK = zzzzz
+    private static final String MIN_CHUNK = String.valueOf(CHARSET.charAt(0)).repeat(DEPTH_CHUNK_SIZE);
+    private static final String MAX_CHUNK = String.valueOf(CHARSET.charAt(CHARSET.length() -1)).repeat(DEPTH_CHUNK_SIZE);
+
+    public static CommentPath create(String path) {
+        if (isDepthOverflowed(path)) {
+            throw new IllegalStateException("Depth overflowed");
+        }
+        CommentPath commentPath = new CommentPath();
+        commentPath.path = path;
+        return commentPath;
+    }
+
+    private static boolean isDepthOverflowed(String path) {     // 최대 5 depth 가 넘어가면 예외
+        return callDepth(path) > MAX_DEPTH; // 5  depth 가 넘어가면 true 반환
+    }
+
+    private static int callDepth(String path) {     // depth 정보 계산 = path 길이 / 5
+        return path.length() / DEPTH_CHUNK_SIZE;
+    }
+
+    public int getDepth() {     // path 의 depth 를 구하는 함수
+        return callDepth(path);
+    }
+
+    public boolean isRoot() {   // 제일 상위인지
+        return callDepth(path) == 1;
+    }
+
+    public String getParentPath() { // 현재 path 의 parentPath 를 구하는 함수, 끝에 5개만 잘라내면 된다.
+        return path.substring(0, path.length() - DEPTH_CHUNK_SIZE);
+    }
+
+    // 현재 path 에 하위 댓글의 path 만드는 메소드
+    public CommentPath createChildCommentPath(String descendantsTopPath) {
+        if(descendantsTopPath == null) {    // 하위 댓글이 처음 생성 되는 상황
+            return CommentPath.create(path + MIN_CHUNK);
+        }
+        String childrenTopPath = findChildrenTopPath(descendantsTopPath);
+        return CommentPath.create(increase(childrenTopPath)); // childrenTopPath + 1
+    }
+
+    private String findChildrenTopPath(String descendantsTopPath) {
+        return descendantsTopPath.substring(0, (getDepth() + 1) * DEPTH_CHUNK_SIZE);
+    }
+
+    private String increase(String path) {
+        String lastChunk = path.substring(path.length() - DEPTH_CHUNK_SIZE);// path 의 가장 마지막 5개의 문자열
+        if (isChunkOverflowed(lastChunk)) {
+            throw new IllegalStateException("Chunk overflowed");
+        }
+        // overflow 가 나지 않으면 path 에서 + 1
+        int charsetLength = CHARSET.length();
+        int value = 0;  // lastChunk 를 10 진수로 변환하기 위한 값
+        for (char ch : lastChunk.toCharArray()) {
+            value = value * charsetLength + CHARSET.indexOf(ch);
+        }
+
+        value = value + 1;
+
+        String result = ""; // value 를 62 진수로 변환
+        for (int i=0; i < DEPTH_CHUNK_SIZE; i++) {
+            result = CHARSET.charAt(value % charsetLength) + result;
+            value /= charsetLength;
+        }
+
+        return path.substring(0, path.length() - DEPTH_CHUNK_SIZE) + result;    // 상위 댓글 경로 정보 + result
+
+    }
+
+    private boolean isChunkOverflowed(String lastChunk) {   // zzzzz 인지 확인
+        return MAX_CHUNK.equals(lastChunk);
+    }
+}
+```
+- CommentPathTest
+```java
+class CommentPathTest {
+
+    @Test
+    void createChildCommentTest() {
+        createChildCommentTest(CommentPath.create(""), null, "00000");
+        createChildCommentTest(CommentPath.create("00000"), null, "0000000000");
+        createChildCommentTest(CommentPath.create(""), "00000", "00001");
+        createChildCommentTest(CommentPath.create("0000z"), "0000zabcdzzzzzzzzzzz", "0000zabce0");
+    }
+
+    void createChildCommentTest(CommentPath commentPath, String descendantsTopPath, String expectedChildPath) {
+        CommentPath childCommentPath = commentPath.createChildCommentPath(descendantsTopPath);
+        assertThat(childCommentPath.getPath()).isEqualTo(expectedChildPath);
+    }
+
+    @Test
+    void createChildCommentPathIfMaxDepthTest() {
+        assertThatThrownBy(() ->
+                CommentPath.create("zzzzz".repeat(5)).createChildCommentPath(null)
+        ).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void createChildCommentPathIfChunkOverflowTest() {
+        CommentPath commentPath = CommentPath.create("");
+        assertThatThrownBy(() -> commentPath.createChildCommentPath("zzzzz"))
+                .isInstanceOf(IllegalStateException.class);
+    }
+}
+```
+- entity
+```java
+@Table(name = "comment_v2")
+@Getter
+@Entity
+@ToString
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+public class CommentV2 {
+    @Id
+    private Long commentId;
+    private String content;
+    private Long articleId; // shard key
+    private Long writerId;
+    @Embedded
+    private CommentPath commentPath;
+    private Boolean deleted;
+    private LocalDateTime createdAt;
+
+    public static CommentV2 create(Long commentId, String content, Long articleId, Long writerId, CommentPath commentPath) {
+        CommentV2 comment = new CommentV2();
+        comment.commentId = commentId;
+        comment.content = content;
+        comment.articleId = articleId;
+        comment.writerId = writerId;
+        comment.commentPath = commentPath;
+        comment.deleted = false;
+        comment.createdAt = LocalDateTime.now();
+        return comment;
+    }
+
+    public boolean isRoot() {
+        return commentPath.isRoot();
+    }
+    
+    public void delete() {
+        deleted = true;
+    }
+}
+```
+- repository
+```java
+@Repository
+public interface CommentRepositoryV2 extends JpaRepository<CommentV2, Long> {
+
+    // path 가 unique 한 index 로 만들어져있기 때문에 path 로 댓글을 찾을 수 있다.
+    @Query("select c from CommentV2 c where c.commentPath.path = :path")    //jqpl
+    Optional<CommentV2> findByPath(@Param("path") String path);
+    
+    // descendantsTopPath
+    @Query(
+            value = "select path from comment_v2 " +
+                    "where articleId = :articleId " +
+                    " and path > :pathPrefix " +    //  자기 자신 제외
+                    " and path like :pathPrefix% " +    // parentPath를 prefix로 하는 모든 자손 검색 조건
+                    " order by path desc limit 1",
+            nativeQuery = true
+    )
+    Optional<String> findDescendantsTopPath(
+            @Param("articleId") Long articleId,
+            @Param("pathPrefix") String pathPrefix  // parent Path
+    );
+}
+```
+- service
+```java
+@Getter
+public class CommentCreateRequestV2 {
+    private Long articleId;
+    private String content;
+    private String parentPath;
+    private Long writerId;
+}
+```
+- response 에 V2 용 팩토리 메서드도 생성
+```java
+@Service
+@RequiredArgsConstructor
+public class CommentServiceV2 {
+    private final Snowflake snowflake = new Snowflake();
+    private final CommentRepositoryV2 commentRepository;
+
+    @Transactional
+    public CommentResponse create(CommentCreateRequestV2 request) {
+        CommentV2 parent = findParent(request); // 상위 댓글 찾기
+        CommentPath parentCommentPath = parent == null ? CommentPath.create("") : parent.getCommentPath();
+        CommentV2 comment = commentRepository.save(
+            CommentV2.create(
+                snowflake.nextId(),
+                request.getContent(),
+                request.getArticleId(),
+                request.getWriterId(),
+                parentCommentPath.createChildCommentPath(
+                        commentRepository.findDescendantsTopPath(request.getArticleId(), parentCommentPath.getPath())
+                                .orElse(null)
+                )
+            )
+        );
+        return CommentResponse.from(comment);
+    }
+
+    private CommentV2 findParent(CommentCreateRequestV2 request) {
+        String parentPath = request.getParentPath();
+        if(parentPath == null) {
+            return null;
+        }
+        return commentRepository.findByPath(parentPath)
+                .filter(not(CommentV2::getDeleted)) // 삭제 확인
+                .orElseThrow();
+    }
+    
+    // 읽기 
+    public CommentResponse read(Long commentId) {
+        return CommentResponse.from(commentRepository.findById(commentId).orElseThrow());
+    }
+    
+    // 삭제
+    @Transactional
+    public void delete(Long commentId) {
+        commentRepository.findById(commentId)
+                .filter(not(CommentV2::getDeleted))
+                .ifPresent(comment -> {
+                    if (hasChildren(comment)) {
+                        comment.delete();
+                    } else {
+                        delete(comment);
+                    } 
+                });
+        
+    }
+
+    // descendantsTopPath 를 조회해서 없으면 자손 댓글이 X
+    private boolean hasChildren(CommentV2 comment) {
+        return commentRepository.findDescendantsTopPath(
+                comment.getArticleId(),
+                comment.getCommentPath().getPath()
+        ).isPresent(); 
+    }
+
+    private void delete(CommentV2 comment) {
+        commentRepository.delete(comment);
+        if(!comment.isRoot()){  // 삭제된 상위 댓글을 찾아 지워야한다. (상위 댓글이 삭제됬어도 자식이 있어서 못 지워진 경우)
+            commentRepository.findByPath(comment.getCommentPath().getParentPath())
+                    .filter(CommentV2::getDeleted)    // delete true
+                    .filter(not(this::hasChildren)) // 자식이 없어야 지울수 있다.
+                    .ifPresent(this::delete);   // 삭제 수행
+        }
+    }
+}
+```
+- controller
+```java
+@RestController
+@RequiredArgsConstructor
+public class CommentControllerV2 {
+    private final CommentServiceV2 commentService;
+
+    // 조회
+    @GetMapping("/v2/comments/{commentId}")
+    public CommentResponse read(@PathVariable Long commentId) {
+        return commentService.read(commentId);
+    }
+
+    // 생성
+    @PostMapping("/v2/comments")
+    public CommentResponse create(@RequestBody CommentCreateRequestV2 request) {
+        return commentService.create(request);
+    }
+
+    // 삭제
+    @DeleteMapping("/v2/comments/{commentId}")
+    public void delete(@PathVariable("commentId") Long commentId) {
+        commentService.delete(commentId);
+    }
+}
+```
+- api test
+```java
+public class CommentApiV2Test {
+    RestClient restClient = RestClient.create("http://localhost:9001");
+
+    @Test
+    void create() {
+        CommentResponse response1 = create(new CommentCreateRequestV2(1L, "my comment1", null, 1L));
+        CommentResponse response2 = create(new CommentCreateRequestV2(1L, "my comment2", response1.getPath(), 1L));
+        CommentResponse response3 = create(new CommentCreateRequestV2(1L, "my comment3", response2.getPath(), 1L));
+
+        System.out.println("response1.getPath() = " + response1.getPath());
+        System.out.println("response1.getCommentId() = " + response1.getCommentId());
+        System.out.println("\tresponse2.getPath() = " + response2.getPath());
+        System.out.println("\tresponse2.getCommentId() = " + response2.getCommentId());
+        System.out.println("\t\tresponse3.getPath() = " + response3.getPath());
+        System.out.println("\t\tresponse3.getCommentId() = " + response3.getCommentId());
+    }
+
+    CommentResponse create(CommentCreateRequestV2 request) {
+        return restClient.post()
+                .uri("/v2/comments")
+                .body(request)
+                .retrieve()
+                .body(CommentResponse.class);
+    }
+ 
+    @Test
+    void read() {
+        CommentResponse response = restClient.get()
+                .uri("/v2/comments/{commentId}", 148277722815254528L)
+                .retrieve()
+                .body(CommentResponse.class);
+        System.out.println("response = " + response);
+    }
+
+    @Test
+    void delete() {
+        restClient.delete()
+                .uri("/v2/comments/{commentId}", 148277722815254528L)
+                .retrieve();
+    }
+
+    @Getter
+    @AllArgsConstructor
+    static class CommentCreateRequestV2 {
+        private Long articleId;
+        private String content;
+        private String parentPath;
+        private Long writerId;
+    }
+}
+```
+- data 생성
+- 멀티스레드로 동시에 생성 하므로 path 가 겹칠수도 있는데   
+path 는 unique index 로 만들어져서 독립적인 경로다. start 와 end 로 중복이안되게 범위를 파라미터로 전달
+
+```java
+@SpringBootTest
+public class DataInitializerV2 {
+
+    @PersistenceContext
+    EntityManager entityManager;
+    @Autowired
+    TransactionTemplate transactionTemplate;
+    Snowflake snowflake = new Snowflake();
+    CountDownLatch latch = new CountDownLatch(EXECUTE_COUNT);
+
+    static final int BULK_INSERT_SIZE = 2000;
+    static final int EXECUTE_COUNT = 6000;
+
+    @Test
+    void initialize() throws InterruptedException {
+        ExecutorService executorService = Executors.newFixedThreadPool(10);
+        for(int i = 0; i < EXECUTE_COUNT; i++) {
+            int start = i * BULK_INSERT_SIZE;
+            int end = (i + 1) * BULK_INSERT_SIZE;
+            executorService.submit(() -> {
+                insert(start, end);
+                latch.countDown();
+                System.out.println("latch.getCount() = " + latch.getCount());
+            });
+        }
+        latch.await();
+        executorService.shutdown();
+    }
+
+    void insert(int start, int end) {
+        transactionTemplate.executeWithoutResult(status -> {
+            for(int i = start; i < end; i++) {
+                CommentV2 comment = CommentV2.create(
+                        snowflake.nextId(),
+                        "content",
+                        1L,
+                        1L,
+                        toPath(i)
+                );
+                entityManager.persist(comment);
+            }
+        });
+    }
+
+    private static final String CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    private static final int DEPTH_CHUNK_SIZE = 5;  // 경로정보 depth 당 5개
+
+    CommentPath toPath(int value) {
+        String path = "";
+        for (int i=0; i < DEPTH_CHUNK_SIZE; i++) {
+            path = CHARSET.charAt(value % CHARSET.length()) + path;
+            value /= CHARSET.length();
+        }
+        return CommentPath.create(path);
+    }
+}
+```
+
+<br>
+
+### 8. 댓글 무한 depth - 목록 API 구현
+___
+- repository
+```java
+@Repository
+public interface CommentRepositoryV2 extends JpaRepository<CommentV2, Long> {
+    // 게시글 목록 조회
+    @Query(
+            value = "select comment_v2.comment_id, comment_v2.content, comment_v2.path, comment_v2.article_id   " +
+                    "comment_v2.writer_id, comment_v2.deleted, comment_v2 created_at    " +
+                    "from (" +
+                    "   select comment_id from comment_v2 where article_id = :articleId " +
+                    "   order by path asc   " +
+                    "   limit :limit offset :offset " +
+                    ") t left join comment_v2 on t.comment_id = comment_v2.comment_id",
+            nativeQuery = true
+    )
+    List<CommentV2> findAll(
+            @Param("articleId") Long articleId,
+            @Param("offset") Long offset,
+            @Param("limit") Long limit
+    );
+
+    @Query(
+            value = "select count(*) from (" +
+                    "   select comment_id from comment_v2 where article_id :articleId limit :limit" +
+                    ") t",
+            nativeQuery = true
+    )
+    Long count(@Param("articleId") Long articleId, @Param("limit") Long limit);
+
+    // 무한 스크롤 
+    @Query(
+            value = "select comment_v2.comment_id, comment_v2.content, comment_v2.path, comment_v2.article_id   " +
+                    "comment_v2.writer_id, comment_v2.deleted, comment_v2 created_at    " +
+                    "from comment_v2 " +
+                    "where article_id = :articleId  " +
+                    "order by path asc  " +
+                    "limit :limit",
+            nativeQuery = true
+    )
+    List<CommentV2> findAllInfiniteScroll(
+            @Param("articleId") Long articleId,
+            @Param("limit") Long limit
+    );
+
+    
+    @Query(
+            value = "select comment_v2.comment_id, comment_v2.content, comment_v2.path, comment_v2.article_id   " +
+                    "comment_v2.writer_id, comment_v2.deleted, comment_v2 created_at    " +
+                    "from comment_v2 " +
+                    "where article_id = :articleId and path > :lastPath " +
+                    "order by path asc  " +
+                    "limit :limit",
+            nativeQuery = true
+    )
+    List<CommentV2> findAllInfiniteScroll(
+            @Param("articleId") Long articleId,
+            @Param("lastPath") String lastPath,
+            @Param("limit") Long limit
+    );
+}
+```
+- service
+```java
+@Service
+@RequiredArgsConstructor
+public class CommentServiceV2 {
+    private final Snowflake snowflake = new Snowflake();
+    private final CommentRepositoryV2 commentRepository;
+
+    // 페이지 번호 방식 메소드
+    public CommentPageResponse readAll(Long articleId, Long page, Long pageSize) {
+        return CommentPageResponse.of(
+                commentRepository.findAll(articleId, (page - 1) * pageSize, pageSize).stream()
+                        .map(CommentResponse::from)
+                        .toList(),
+                commentRepository.count(articleId, PageLimitCalculator.calculatePageLimit(page, pageSize, 10L))
+        );
+    }
+
+    public List<CommentResponse> readAllInfiniteScroll(Long articleId, String lastPath, Long pageSize) {
+        List<CommentV2> comments = lastPath == null ?
+                commentRepository.findAllInfiniteScroll(articleId, pageSize) :
+                commentRepository.findAllInfiniteScroll(articleId, lastPath, pageSize);
+        return comments.stream().map(CommentResponse::from).toList();
+    }
+}
+```
+
+- controller
+```java
+@RestController
+@RequiredArgsConstructor
+public class CommentControllerV2 {
+    private final CommentServiceV2 commentService;
+
+    // 페이지 방식 목록 조회
+    @GetMapping("/v2/comments")
+    public CommentPageResponse readAll(
+            @RequestParam("articleId") Long articleId,
+            @RequestParam("page") Long page,
+            @RequestParam("pageSize") Long pageSize
+    ) {
+        return commentService.readAll(articleId, page, pageSize);
+    }
+
+    // 무한스크롤 방식 목록 조회
+    @GetMapping("/v2/comments/infinite-scroll")
+    public List<CommentResponse> readAllInfiniteScroll(
+            @RequestParam("articleId") Long articleId,
+            @RequestParam(value = "lastPath", required = false) String lastPath,
+            @RequestParam("pageSize") Long pageSize
+    ) {
+        return commentService.readAllInfiniteScroll(articleId, lastPath, pageSize);
+    }
+}
+```
+- test
+```java
+public class CommentApiV2Test {
+    RestClient restClient = RestClient.create("http://localhost:9001");
+
+    @Test
+    void readAll() {
+        CommentPageResponse response = restClient.get()
+                .uri("/v2/comments?articleId=1&pageSize=10&page=50000")
+                .retrieve()
+                .body(CommentPageResponse.class);
+
+        System.out.println("response = " + response.getCommentCount());
+        for (CommentResponse comment : response.getComments()) {
+            System.out.println("comment.getCommentId() = " + comment.getCommentId());
+        }
+    }
+
+    @Test
+    void readAllInfiniteScroll() {
+        List<CommentResponse> response1 = restClient.get()
+                .uri("/v2/comments/infinite-scroll?articleId=1&pageSize=5")
+                .retrieve()
+                .body(new ParameterizedTypeReference<List<CommentResponse>>() {
+                });
+
+        System.out.println("first page");
+        for (CommentResponse response : response1) {
+            System.out.println("response.getCommentId() = " + response.getCommentId());
+        }
+
+        String lastPath = response1.getLast().getPath();
+
+        List<CommentResponse> response2 = restClient.get()
+                .uri("/v2/comments/infinite-scroll?articleId=1&pageSize=5&lastPath=%s".formatted(lastPath))
+                .retrieve()
+                .body(new ParameterizedTypeReference<List<CommentResponse>>() {
+                });
+
+        System.out.println("second page");
+        for (CommentResponse response : response2) {
+            System.out.println("response.getCommentId() = " + response.getCommentId());
+        }
+    }
+}
+```
