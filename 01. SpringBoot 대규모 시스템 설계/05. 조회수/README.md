@@ -320,3 +320,108 @@ public class ViewApiTest {
     }
 }
 ```
+
+<br>
+
+### 3. 조회수 어뷰징 방지 정책 설계
+___
+- 조회 식별 : 로그인 사용자 -> 사용자, 비로그인 사용자 -> ip, User-Agent, 브라우저 쿠키, 토큰 등
+- 사용자가 10분 내 게시글을 조회 했던사실을 인지하는 방법
+  - 스프링부트는 stateless(무상태) 애플리케이션
+  - 상태 저장소로 DB 사용
+
+```text
+MySQL 사용
+1. 조회수 증가 요청이 오면, 마지막 조회 시점을 조회
+2. 10분 이내의 조회 내역이 있는지 확인
+3. 조회 내역에 따라서,
+    1. 조회 내역이 없다면, 조회수를 증가 그리고 현재 시간으로 마지막 조회 시점을 업데이트
+    2. 조회 내역이 있다면, 조회수를 증가X
+=> 
+- 트래픽이 많을 수 있다. => 성능을 위해 Redis 를 사용했는데 MySQL을 다시 사용하는 ..
+- 동시성 문제 => MySQL은 조회수 동시 요청이 들어오면 락을 점유 => Redis 는 Single Thread , 하나의 명령어는 원자적으로 처리
+- 자동 삭제 => MySQL은 게시글이 삭제되거나 갱신될 일이 없다면, 직접 삭제를 위한 배치등의 시스템을 구축해야한다.
+ => Redis 는 TTL 을 지원(시간이 지나면 자동삭제)
+
+
+- Redis 활용
+1. 조회수 증가 요청이 오면, Redis에 TTL=10분 으로 데이터 저장     
+    - 게시글 조회는 사용자 단위로 식별되므로, key=(articleId+userId)
+    - 이미 저장된 데이터가 있으면 저장에 실패하는 명령어를 사용 => setIfAbsent (데이터가 없을 때에만 저장)
+2. 데이터 저장 성공 여부에 따라,
+    - 성공 했으면, 조회 내역이 없었음을 의미한다. 조회수를 증가한다.
+    - 실패 했으면, 조회 내역이 있었음을 의미한다. 조회수를 증가하지 않는다    
+
+- 이러한 과정은 사용자의 게시글 조회수 증가에 대해서 Lock을 획득한다고 볼 수 있다.
+시스템은 확장성이 고려된 분산 시스템이다. 
+이렇게 분산 시스템에서 락을 획득하는 것을, 분산 락이라고 한다. => Distributed Lock
+- 조회수 서비스의 여러 서버 애플리케이션들은 사용자의 게시글 조회수 증가에 대해서 10분 간 분산 락을 획득
+분산 락이 점유되면, 다른 요청은 락이 10분 후에 해제되기 까지, 락을 추가로 점유할 수 없다.
+
+*** 동일 게시글에 동일한 사용자가 2개의 조회수 증가 요청을 동시에 호출
+- 요청 1은 조회수 증가를 처리 하기 위해 분산 락을 요청 => key = articleId + userId, TTL = 10분
+- 요청 1은 분산 락이 이미 점유된 게 없었기 때문에, 분산 락 획득에 성공한다. => setIfAbsent = True 
+- 이어서 동일 게시글에 동일 사용자가 분산 락을 다시 요청
+- 하지만 요청 1에서 이미 분산 락을 10분 간 점유 했으므로, 요청 2는 분산 락 획득에 실패 => setIfAbsent = False
+- 요청 1에서는 조회 수 증가를 처리하고, 요청 2는 그냥 종료 된다. 
+=> 분산 락이 점유되고 있는 10분 동안, 동일 게시글에 동일 사용자에 대한 모든 조회수 증가 요청은 무시된다.
+Redis는 Single Thread로 동작하고, setIfAbsent는 원자적으로 처리되기 때문에, 동시성 고려는 필요 없었다.
+```
+
+<br>
+
+### 4. 조회수 어뷰징 방지 정책 구현
+___
+- repository
+```java
+@Repository
+@RequiredArgsConstructor
+public class ArticleViewDistributedLockRepository {
+    private final StringRedisTemplate redisTemplate;
+
+    // view::article::{article_id}::user::{user_id}::lock
+    private static final String KEY_FORMAT = "view::article::%s::user::%s::lock";
+
+    // lock 획득 메소드
+    public boolean lock(Long articleId, Long userId, Duration ttl) {
+        String key = generateKey(articleId, userId);
+        return redisTemplate.opsForValue().setIfAbsent(key, "", ttl);   // 이미 저장된 데이터가 있으면 false
+    }
+
+    public String generateKey(Long articleId, Long userId) {
+        return KEY_FORMAT.formatted(articleId, userId);
+    }
+}
+```
+- Service 에 조회수 증가 메서드에 어뷰징 방지 조건 추가
+```java
+@Service
+@RequiredArgsConstructor
+public class ArticleViewService {
+    private final ArticleViewCountRepository articleViewCountRepository;
+    private final ArticleViewCountBackUpProcessor articleViewCountBackUpProcessor;
+    private final ArticleViewDistributedLockRepository articleViewDistributedLockRepository;
+
+    private static final int BACKUP_BATCH_SIZE = 100;
+    private static final Duration TTL = Duration.ofMinutes(10);
+
+    public Long increase(Long articleId, Long userId) {
+        /* 어뷰징 방지 S, 실패시 증가 X, 현재 조회수 반환 */
+        if (!articleViewDistributedLockRepository.lock(articleId, userId, TTL)) {
+            return articleViewCountRepository.read(articleId);
+        }
+        /* 어뷰징 방지 E */
+
+        Long count = articleViewCountRepository.increase(articleId);
+        if(count % BACKUP_BATCH_SIZE == 0) {
+            articleViewCountBackUpProcessor.backup(articleId, count);
+        }
+        return count;
+    }
+
+    public Long count(Long articleId) {
+        return articleViewCountRepository.read(articleId);
+    }
+}
+```
+- 기존 Multi Thread로 1000번 조회하는 테스트 실행시(같은 ID 라는 조건) => 조회수 1이 증가됨을 확인할 수 있다.
