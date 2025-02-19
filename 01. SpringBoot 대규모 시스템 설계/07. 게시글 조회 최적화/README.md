@@ -278,3 +278,155 @@ public class ArticleQueryModelRepository {
     }
 }
 ```
+
+<br>
+
+### 4. 게시글 조회 최적화 구현 - 이벤트 핸들러 및 서비스 레이어
+___
+- event handler 
+```java
+public interface EventHandler<T extends EventPayload> {
+    void handle(Event<T> event);
+    boolean supports(Event<T> event);
+}
+```
+- ArticleReadResponse
+```java
+@Getter
+@ToString
+public class ArticleReadResponse {
+    private Long articleId;
+    private String title;
+    private String content;
+    private Long boardId;
+    private Long writerId;
+    private LocalDateTime createdAt;
+    private LocalDateTime modifiedAt;
+    private Long articleCommentCount;
+    private Long articleLikeCount;
+    private Long articleViewCount;  // view Service 로 직접 가져옴
+
+    public static ArticleReadResponse from(ArticleQueryModel articleQueryModel, Long ViewCount) {
+        ArticleReadResponse response = new ArticleReadResponse();
+        response.articleId = articleQueryModel.getArticleId();
+        response.title = articleQueryModel.getTitle();
+        response.content = articleQueryModel.getContent();
+        response.boardId = articleQueryModel.getBoardId();
+        response.writerId = articleQueryModel.getWriterId();
+        response.createdAt = articleQueryModel.getCreatedAt();
+        response.modifiedAt = articleQueryModel.getModifiedAt();
+        response.articleCommentCount = articleQueryModel.getArticleCommentCount();
+        response.articleLikeCount = articleQueryModel.getArticleLikeCount();
+        response.articleViewCount = ViewCount;
+        return response;
+    }
+}
+```
+- service
+```java
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class ArticleReadService {
+    // 데이터 없을때 command 서버로 요청 해야하니 필요 client 주입
+    private final ArticleClient articleClient;
+    private final CommentClient commentClient;
+    private final LikeClient likeClient;
+    private final ViewClient viewClient;
+    private final ArticleQueryModelRepository articleQueryModelRepository;
+    private final List<EventHandler> eventHandlers;
+
+    public void handleEvent(Event<EventPayload> event) {    // consumer 를 통해 호출
+        for (EventHandler eventHandler : eventHandlers) {
+            if(eventHandler.supports(event)) {
+                eventHandler.handle(event);
+            }
+        }
+    }
+
+    // 게시글 데이터 조회 메소드
+    public ArticleReadResponse read(Long articleId) {
+        ArticleQueryModel articleQueryModel = articleQueryModelRepository.read(articleId)
+                .or(() -> fetch(articleId))   // data 가 없으면? fetch 에서 command Service 에서 데이터 호출
+                .orElseThrow();
+
+        return ArticleReadResponse.from(articleQueryModel, viewClient.count(articleId));
+    }
+
+    private Optional<ArticleQueryModel> fetch(Long articleId) {
+        //articleClient 호출한거 queryModel 생성 -> repository 저장
+        Optional<ArticleQueryModel> articleQueryModelOptional = articleClient.read(articleId)
+                .map(article -> ArticleQueryModel.create(
+                        article,
+                        commentClient.count(articleId),
+                        likeClient.count(articleId)
+                ));
+        articleQueryModelOptional.ifPresent(articleQueryModel -> {
+            articleQueryModelRepository.create(articleQueryModel, Duration.ofDays(1));
+        });
+        log.info("[ArticleReadService.fetch] fetch data, articleId={}, isPresent={}", articleId, articleQueryModelOptional.isPresent());
+        return articleQueryModelOptional;
+    }
+}
+```
+- handler 구현체, 게시글 생성/삭제/수정, 좋아요 생성/삭제,  댓글 생성/삭제
+- article create
+```java
+@Component
+@RequiredArgsConstructor
+public class ArticleCreatedEventHandler implements EventHandler<ArticleCreatedEventPayload> {
+    private final ArticleQueryModelRepository articleQueryModelRepository;
+    @Override
+    public void handle(Event<ArticleCreatedEventPayload> event) {
+        ArticleCreatedEventPayload payload = event.getPayload();
+        articleQueryModelRepository.create(
+                ArticleQueryModel.create(payload),
+                Duration.ofDays(1)
+        );
+    }
+
+    @Override
+    public boolean supports(Event<ArticleCreatedEventPayload> event) {
+        return EventType.ARTICLE_CREATED == event.getType();
+    }
+}
+```
+- article delete
+```java
+@Component
+@RequiredArgsConstructor
+public class ArticleDeletedEventHandler implements EventHandler<ArticleDeletedEventPayload> {
+    private final ArticleQueryModelRepository articleQueryModelRepository;
+    @Override
+    public void handle(Event<ArticleDeletedEventPayload> event) {
+        ArticleDeletedEventPayload payload = event.getPayload();
+        articleQueryModelRepository.delete(payload.getArticleId());
+    }
+
+    @Override
+    public boolean supports(Event<ArticleDeletedEventPayload> event) {
+        return EventType.ARTICLE_DELETED == event.getType();
+    }
+}
+```
+- article update, 좋아요 생성/삭제, 댓글 생성, 삭제
+```java
+@Component
+@RequiredArgsConstructor
+public class ArticleUpdatedEventHandler implements EventHandler<ArticleUpdatedEventPayload> {
+    private final ArticleQueryModelRepository articleQueryModelRepository;
+    @Override
+    public void handle(Event<ArticleUpdatedEventPayload> event) {
+        articleQueryModelRepository.read(event.getPayload().getArticleId())
+                .ifPresent(articleQueryModel -> {
+                    articleQueryModel.updateBy(event.getPayload());
+                    articleQueryModelRepository.update(articleQueryModel);
+                });
+    }
+
+    @Override
+    public boolean supports(Event<ArticleUpdatedEventPayload> event) {
+        return EventType.ARTICLE_UPDATED == event.getType();
+    }
+}
+```
