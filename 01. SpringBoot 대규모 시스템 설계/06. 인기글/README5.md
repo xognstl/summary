@@ -316,3 +316,76 @@ public class MessageRelay {
 hello.board.common.outboxmessagerelay.MessageRelayConfig
 - config 위치 지정
 - 다른 모듈에서 outboxmessagerelay 를 dependency로 등록하면 messageRelayConfig 를 자동으로 읽어 컴포넌트 스캔한다.
+
+<br>
+
+### 11. Transactional Outbox 모듈 적용
+___
+- article/comment/like/view 프로젝트에 redis, kafka dependency 추가
+- build.gradle 에 event, outbox-message-relay 프로젝트 등록
+- Outbox repository scan 할수 있게 각 프로젝트에 scan 등록
+```java
+@EntityScan(basePackages = "hello.board")
+@SpringBootApplication
+@EnableJpaRepositories(basePackages = "hello.board")
+public class ViewApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ViewApplication.class, args);
+    }
+}
+```
+- 게시글이 생성, 삭제 될때 이벤트를 보내줘야한다.
+- article Service 에 create, update, delete 할때 이벤트 발행
+- comment Service 에 create, delete 할때 이벤트 발행
+- like Service 에 likePessimisticLock1, unlikePessimisticLock1 할때 이벤트 발행
+- View 에서는 백업하는 시점에 이벤트 발행
+```java
+@Service
+@RequiredArgsConstructor
+public class ArticleService {
+    private final Snowflake snowflake = new Snowflake();
+    private final ArticleRepository articleRepository;
+    private final OutboxEventPublisher outboxEventPublisher;    // 이벤트 전송 -> MessageRelay 에서 event를 받아서 커밋전, 후 메소드 실행
+    private final BoardArticleCountRepository boardArticleCountRepository;
+
+    @Transactional
+    public ArticleResponse create(ArticleCreateRequest request) {
+        Article article = articleRepository.save(
+                Article.create(snowflake.nextId(), request.getTitle(), request.getContent(), request.getBoardId(), request.getWriterId())
+        );
+        /* total 게시글 수 증가 S */
+        int result = boardArticleCountRepository.increase(article.getBoardId());
+        if (result == 0) {
+            boardArticleCountRepository.save(
+                    BoardArticleCount.init(request.getBoardId(), 1L)
+            );
+        }
+        /* total 게시글 수 증가 E */
+
+        /* kafka에 event 발행 */
+        outboxEventPublisher.publish(
+                EventType.ARTICLE_CREATED,
+                ArticleCreatedEventPayload.builder()
+                        .articleId(article.getArticleId())
+                        .title(article.getTitle())
+                        .content(article.getContent())
+                        .boardId(article.getBoardId())
+                        .writerId(article.getWriterId())
+                        .createdAt(article.getCreatedAt())
+                        .modifiedAt(article.getModifiedAt())
+                        .boardArticleCount(count(article.getBoardId()))
+                        .build(),
+                article.getBoardId() //동일한 단일 트랜잭션에서 동일한 shard로 처리되야한다. article의 shard key
+        );
+
+        return ArticleResponse.from(article);
+    }
+
+    // total 개수 구하기
+    public Long count(Long boardId) {
+        return boardArticleCountRepository.findById(boardId)
+                .map(BoardArticleCount::getArticleCount)
+                .orElse(0L);
+    }
+}
+```
