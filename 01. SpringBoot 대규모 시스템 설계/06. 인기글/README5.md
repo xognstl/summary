@@ -389,3 +389,141 @@ public class ArticleService {
     }
 }
 ```
+
+<br>
+
+### 12. Transactional Outbox 테스트
+___
+- Article Service 실행 
+- 애플리케이션 개수만ㅋ믐 shard 를 균등하게 할당 -> 하나만 떠있어서 할당된 shard가 4개
+- Article Service 한개 더실행하면 shard 가 2가 된다.
+- shard는 [0,1], [2,3] 으로 할당
+- Outbox-message-relay 가 정상적으로 전송 처리 되는지 테스트
+```text
+ArticleApiTest 에 기존에 했던 게시글 생성 테스트 실행하면 정상
+이벤트가 발생하고 commit 전에 outbox 테이블에 이벤트 저장 후 
+commit 이 끝나면 outbox 테이블에 이벤트 삭제 
+
+kafka 를 종료해도 이벤트 생성은 된다. outbox 테이블에 이벤트 저장 후 삭제가 안된다.
+
+다시 kafka 를 기동하면 publishPendingEvent() 10초에 한번씩 전송안된 이벤트를 주기적으로 polling 하는 메소드에서
+이벤트 전송하여 삭제처리가 된다.
+```
+
+<br>
+
+### 13. 인기글 Producer&Consumer 테스트
+___
+- 인기글 서비스에 전송된 이벤트가 잘 컨슘되고 인기글이 만들어지는지 테스트
+- article/comment/like/view 서비스에 데이터 생성 요청
+```java
+public class DataInitializer {
+    RestClient articleServiceClient = RestClient.create("http://localhost:9000");
+    RestClient commentServiceClient = RestClient.create("http://localhost:9001");
+    RestClient likeServiceClient = RestClient.create("http://localhost:9002");
+    RestClient viewServiceClient = RestClient.create("http://localhost:9003");
+
+    @Test
+    void initialize() {
+        for (int i = 0; i < 30; i++) {
+            Long articleId = createArticle();
+            // 게시글에 난수만큼 댓글, 좋아요, 조회수 생성
+            long commentCount = RandomGenerator.getDefault().nextLong(10);
+            long likeCount = RandomGenerator.getDefault().nextLong(10);
+            long viewCount = RandomGenerator.getDefault().nextLong(200);
+
+            createComment(articleId, commentCount);
+            like(articleId, likeCount);
+            view(articleId, viewCount);
+        }
+    }
+
+    Long createArticle() {
+        return articleServiceClient.post()
+                .uri("/v1/articles")
+                .body(new ArticleCreateRequest("title", "content", 1L, 1L))
+                .retrieve()
+                .body(ArticleResponse.class)
+                .getArticleId();
+    }
+
+    // article 생성에 필요한 파라미터 전달
+    @Getter
+    @AllArgsConstructor
+    static class ArticleCreateRequest {
+        private String title;
+        private String content;
+        private Long writerId;
+        private Long boardId;
+    }
+
+    @Getter
+    static class ArticleResponse {
+        private Long articleId;
+    }
+
+    void createComment(Long articleId, Long commentCount) {
+        while (commentCount-- > 0) {
+            commentServiceClient.post()
+                    .uri("/v2/comments")
+                    .body(new CommentCreateRequest(articleId, "content", 1L))
+                    .retrieve();
+        }
+    }
+
+    @Getter
+    @AllArgsConstructor
+    static class CommentCreateRequest {
+        private Long articleId;
+        private String content;
+        private Long writerId;
+    }
+
+    void like(Long articleId, Long likeCount) {
+        while (likeCount-- > 0) {
+            likeServiceClient.post()
+                    .uri("/v1/article-likes/articles/{articleId}/users/{userId}/pessimistic-lock-1", articleId, likeCount)
+                    .retrieve();
+        }
+    }
+
+    void view(Long articleId, long viewCount) {
+        while (viewCount-- > 0) {
+            viewServiceClient.post()
+                    .uri("/v1/article-views/articles/{articleId}/users/{userId}", articleId, viewCount)
+                    .retrieve();
+        }
+    }
+}
+```
+- 인기글 조회
+```java
+public class HotArticleApiTest {
+    RestClient restClient = RestClient.create("http://localhost:9004");
+
+    @Test
+    void readAllTest() {
+        List<HotArticleResponse> responses = restClient.get()
+                .uri("/v1/hot-articles/articles/date/{dateStr}", "20250219")
+                .retrieve()
+                .body(new ParameterizedTypeReference<List<HotArticleResponse>>() {
+                });
+
+        for (HotArticleResponse response : responses) {
+            System.out.println("response = " + response);
+        }
+    }
+}
+```
+```text
+[HotArticleListRepository.readAll] articleId=150452004389957632, score=134.0
+[HotArticleListRepository.readAll] articleId=150451996353671168, score=131.0
+[HotArticleListRepository.readAll] articleId=150452010077433856, score=127.0
+[HotArticleListRepository.readAll] articleId=150451998836699136, score=123.0
+[HotArticleListRepository.readAll] articleId=150452006671659008, score=122.0
+[HotArticleListRepository.readAll] articleId=150451970126688256, score=116.0
+[HotArticleListRepository.readAll] articleId=150451976762077184, score=114.0
+[HotArticleListRepository.readAll] articleId=150451962123956224, score=113.0
+[HotArticleListRepository.readAll] articleId=150451988594208768, score=109.0
+[HotArticleListRepository.readAll] articleId=150452011658686464, score=108.0
+```
