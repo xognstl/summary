@@ -244,3 +244,139 @@ public class OptimizedCacheLockProvider {
     }
 }
 ```
+
+- OptimizedCacheOriginDataSupplier
+```java
+@FunctionalInterface
+public interface OptimizedCacheOriginDataSupplier<T> {
+    T get() throws Throwable;
+}
+```
+- OptimizedCacheManager : 캐시를 가져와서 처리 , 원본데이터 요청
+```java
+@Component
+@RequiredArgsConstructor
+public class OptimizedCacheManager {
+    private final StringRedisTemplate redisTemplate; // 캐시 서버
+    private final OptimizedCacheLockProvider optimizedCacheLockProvider;
+
+    // 캐시 키로 파라미터가 여러가지 전달될 수 있는거에대한 구분자
+    private static final String DELIMITER = "::";
+
+    // 캐시 or 원본데이터 에대해서 처리된 결과
+    // 캐시 타입, ttl시간, 캐시에 대해 유니크하게 구분하기 위한 타입별 파라미터, object에 대한 returnType,
+    // 캐시가 만료됬을때 원본데이터를 가져오기위한 메소드
+    public Object process(String type, long ttlSeconds, Object[] args, Class<?> returnType,
+                          OptimizedCacheOriginDataSupplier<?> originDataSupplier) throws Throwable {
+        String key = generateKey(type, args);
+
+        String cachedData = redisTemplate.opsForValue().get(key);
+        if (cachedData == null) {   // 캐시에 데이터가 없을때
+            return refresh(originDataSupplier, key, ttlSeconds);
+        }
+
+        OptimizedCache optimizedCache = DataSerializer.deserialize(cachedData, OptimizedCache.class);// 캐시 데이터가 있는 상황
+        if (optimizedCache == null) {   // 역직렬화가가 잘안됬으면 다시
+            return refresh(originDataSupplier, key, ttlSeconds);
+        }
+
+        if (!optimizedCache.isExpired()) {  // 논리적으로 만료되지 않았으면 데이터 그대로 반환
+            return optimizedCache.parseData(returnType);
+        }
+
+        if (!optimizedCacheLockProvider.lock(key)) {    // 논리적으로 만료가 되니 갱신 , 갱신할때 한건의 요청만 갈수 있도록 락
+            return optimizedCache.parseData(returnType);
+        }
+        try { // 락을 획득한 한건의 요청만 온다
+            return refresh(originDataSupplier, key, ttlSeconds);
+        }finally {
+            optimizedCacheLockProvider.unlock(key); // 락 해제
+        }
+    }
+
+    //원본데이터에 요청 하고 Cache에 데이터를 적재한다.
+    private Object refresh(OptimizedCacheOriginDataSupplier<?> originDataSupplier, String key, long ttlSeconds) throws Throwable {
+        Object result = originDataSupplier.get(); // 원본 데이터
+        OptimizedCacheTTL optimizedCacheTTL = OptimizedCacheTTL.of(ttlSeconds);
+        OptimizedCache optimizedCache = OptimizedCache.of(result, optimizedCacheTTL.getLogicalTTL());// 원본데이터 캐시에 적재
+
+        redisTemplate.opsForValue()
+                .set(
+                        key,
+                        DataSerializer.serialize(optimizedCache),
+                        optimizedCacheTTL.getPhysicalTTL()
+                );
+        return result;
+    }
+
+    private String generateKey(String prefix, Object[] args) {
+        return prefix + DELIMITER +
+                Arrays.stream(args)
+                        .map(String::valueOf)
+                        .collect(Collectors.joining(DELIMITER));
+        // prefix = a, args = [1,2] => a::1::2
+    }
+}
+```
+- 애너테이션으로 간단하게 캐시 매니저를 처리 하려면 build.gradle 에 aop 추가
+- OptimizedCacheable에 애노테이션 생성
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+public @interface OptimizedCacheable {
+    String type();  // 어떤 메소드에 붙일지 유니크하게 구분하기 위한 타입
+    long ttlSeconds();
+}
+```
+- 애노테이션 붙이면 처리될 수 있게 OptimizedCacheAspect 생성
+```java
+@Aspect
+@Component
+@RequiredArgsConstructor
+public class OptimizedCacheAspect {
+    private final OptimizedCacheManager optimizedCacheManager;
+
+    @Around("@annotation(OptimizedCacheable)")   // 메소드 전후로 실행
+    public Object around(ProceedingJoinPoint joinPoint) throws Throwable {
+        OptimizedCacheable cacheable = findAnnotation(joinPoint);
+        return optimizedCacheManager.process(
+                cacheable.type(),
+                cacheable.ttlSeconds(),
+                joinPoint.getArgs(), // 메소드에 선언된 파라미터
+                findReturnType(joinPoint),  // 리턴 타입
+                () -> joinPoint.proceed() // 원본데이터
+        );
+    }
+
+    // ProceedingJoinPoint 이 수행되는 메소드에서 OptimizedCacheable 어노테이션이 달려있는지 찾아올수 있따.
+    private OptimizedCacheable findAnnotation(ProceedingJoinPoint joinPoint) {
+        Signature signature = joinPoint.getSignature();
+        MethodSignature methodSignature = (MethodSignature) signature;
+        // findAnnotation 메소드에 OptimizedCacheable 애노테이션이 달려있는지 꺼내올 수 있다.
+        return methodSignature.getMethod().getAnnotation(OptimizedCacheable.class);
+    }
+
+    private Class<?> findReturnType(ProceedingJoinPoint joinPoint) {
+        Signature signature = joinPoint.getSignature();
+        MethodSignature methodSignature = (MethodSignature) signature;
+        return methodSignature.getReturnType();
+    }
+}
+```
+- viewClient 의 count 에 @OptimizedCacheable(type = "articleViewCount", ttlSeconds = 1) 어노테이션 작성
+
+<br>
+
+### 15. 캐시 최적화 전략 구현 - 테스트
+___
+- viewClientTest 다시 실행
+- @Cacheable 일떄 readCacheableMultiThreadTest 실행시 전부 원본데이터 서버로 전파 
+- 변경 후 한건의 요청만 캐시 갱신
+- 동시 요청이 여러번 가더라도 캐시 갱신에 대해서는 한건의 요청만 처리됬다.
+
+<br>
+
+### 16. 프로젝트 주의 사항
+___
+- Long 이 snowflake 로 너무 큰수가 되면 자바가 아니여도 js 에서도 꺠질 수 있다.
+  - response에 ID 값을 String 으로 반환 하는 방법이 있따.
