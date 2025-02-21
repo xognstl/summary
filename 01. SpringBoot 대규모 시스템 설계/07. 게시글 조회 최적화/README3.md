@@ -124,3 +124,339 @@ public class BoardArticleCountRepository {
     }
 }
 ```
+
+<br>
+
+### 10. 게시글 목록 최적화 전략 구현 - 서비스 & 컨트롤러
+___
+- ArticleClient , 페이징, 무한스크롤 방식 전체 조회 , total count 
+```java
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class ArticleClient {
+    private RestClient restClient;
+
+    @Value("${endpoints.hello-board-article-service.url}")
+    private String articleServiceUrl;
+
+    @PostConstruct
+    public void initRestClient() {
+        restClient = RestClient.create(articleServiceUrl);
+    }
+    public ArticlePageResponse readAll(Long boardId, Long page, Long pageSize) {
+        try {
+            return restClient.get()
+                    .uri("/v1/articles?boardId=%s&page=%s&pageSize=%s".formatted(boardId,page,pageSize))
+                    .retrieve()
+                    .body(ArticlePageResponse.class);
+        }catch (Exception e) {
+            log.error("[ArticleClient.readAll] boardId={}, page={}, pageSize={}", boardId, page, pageSize, e);
+            return ArticlePageResponse.EMPTY;
+        }
+    }
+
+    public List<ArticleResponse> readAllInfiniteScroll(Long boardId, Long lastArticleId, Long pageSize) {
+        try {
+            return restClient.get()
+                    .uri(
+                            lastArticleId != null ?
+                                    "/v1/articles/infinite-scroll?boardId=%s&lastArticleId=%s&pageSize=%s"
+                                            .formatted(boardId, lastArticleId, pageSize) :
+                                    "/v1/articles/infinite-scroll?boardId=%s&pageSize=%s"
+                                            .formatted(boardId, pageSize)
+                    )
+                    .retrieve()
+                    .body(new ParameterizedTypeReference<List<ArticleResponse>>() {});
+        } catch (Exception e) {
+            log.error("[ArticleClient.readAllInfiniteScroll] boardId={}, lastArticleId={}, pageSize={}", boardId, lastArticleId, pageSize, e);
+            return List.of();
+        }
+    }
+
+    public long count(Long boardId) {
+        try {
+            return restClient.get()
+                    .uri("/v1/articles/boardId/{boardId}/count", boardId)
+                    .retrieve()
+                    .body(Long.class);
+        } catch (Exception e) {
+            log.error("[ArticleClient.count] boardId={}", boardId, e);
+            return 0;
+        }
+    }
+
+    // 게시글 목록도 Redis에 저장된게 없으면 원본 데이터 서버에서 가져옴 , 그걸위한 페이징, 카운트 메소드
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ArticlePageResponse {
+        private List<ArticleResponse> articles;
+        private Long articleCount;
+
+        public static ArticlePageResponse EMPTY = new ArticlePageResponse(List.of(), 0L);   // 빈 List 와 0으로 초기화  API호출에러시 반환
+
+    }
+}
+```
+- ArticleCreatedEventHandler 에 게시글 목록, 수 저장 로직 추가
+```java
+@Component
+@RequiredArgsConstructor
+public class ArticleCreatedEventHandler implements EventHandler<ArticleCreatedEventPayload> {
+    private final ArticleIdListRepository articleIdListRepository;  // 게시글 목록 저장
+    private final BoardArticleCountRepository boardArticleCountRepository;  // 게시글 수 저장
+    private final ArticleQueryModelRepository articleQueryModelRepository;
+
+    @Override
+    public void handle(Event<ArticleCreatedEventPayload> event) {
+        ArticleCreatedEventPayload payload = event.getPayload();
+        articleQueryModelRepository.create(
+                ArticleQueryModel.create(payload),
+                Duration.ofDays(1)
+        );
+        articleIdListRepository.add(payload.getBoardId(), payload.getArticleId(), 1000L);
+        boardArticleCountRepository.createOrUpdate(payload.getBoardId(), payload.getBoardArticleCount());
+    }
+
+    @Override
+    public boolean supports(Event<ArticleCreatedEventPayload> event) {
+        return EventType.ARTICLE_CREATED == event.getType();
+    }
+}
+
+```
+- ArticleDeletedEventHandler 에도 게시글 목록 , 수 삭제처리할때 필요한 로직 추가
+```java
+@Component
+@RequiredArgsConstructor
+public class ArticleDeletedEventHandler implements EventHandler<ArticleDeletedEventPayload> {
+    private final ArticleIdListRepository articleIdListRepository;  // 게시글 목록 저장
+    private final BoardArticleCountRepository boardArticleCountRepository;  // 게시글 수 저장
+    private final ArticleQueryModelRepository articleQueryModelRepository;
+    
+    @Override
+    public void handle(Event<ArticleDeletedEventPayload> event) {
+        ArticleDeletedEventPayload payload = event.getPayload();
+        articleIdListRepository.delete(payload.getBoardId(), payload.getArticleId());
+        articleQueryModelRepository.delete(payload.getArticleId());
+        boardArticleCountRepository.createOrUpdate(payload.getBoardId(), payload.getBoardArticleCount());
+        // 게시글 목록 삭제 -> QueryModel 삭제 -> Count update 
+        //query model 삭제되면 게시글은 삭제되었지만 목록에는 존재해서 사이에 조회를 하면 에러가 날수있다.
+    }
+
+    @Override
+    public boolean supports(Event<ArticleDeletedEventPayload> event) {
+        return EventType.ARTICLE_DELETED == event.getType();
+    }
+}
+```
+- page 목록 방식 response
+```java
+@Getter
+public class ArticleReadPageResponse {
+    private List<ArticleReadResponse> articles; // 게시글 목록
+    private Long articleCount;
+    
+    public static ArticleReadPageResponse of(List<ArticleReadResponse> articles, Long articleCount) {
+        ArticleReadPageResponse response = new ArticleReadPageResponse();
+        response.articles = articles;
+        response.articleCount = articleCount;
+        return response;
+    }
+}
+```
+- ArticleQueryModelRepository 에 readAll 메서드 생성
+```java
+@Repository
+@RequiredArgsConstructor
+public class ArticleQueryModelRepository {
+    private final StringRedisTemplate redisTemplate;
+
+    private String generateKey(ArticleQueryModel articleQueryModel) {
+        return generateKey(articleQueryModel.getArticleId());
+    }
+
+    private String generateKey(Long articleId) {
+        return KEY_FORMAT.formatted(articleId);
+    }
+
+    public Map<Long, ArticleQueryModel> readAll(List<Long> articleIds) {
+        List<String> keyList = articleIds.stream().map(this::generateKey).toList();
+        // multiget : 리스트를 전달해서 여러개의 데이터 한번에 조회
+        return redisTemplate.opsForValue().multiGet(keyList).stream()
+                .map(json -> DataSerializer.deserialize(json, ArticleQueryModel.class))
+                .collect(toMap(ArticleQueryModel::getArticleId, identity()));
+    }
+}
+```
+- Service 목록조회 메서드 생성
+```java
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class ArticleReadService {
+    // 데이터 없을때 command 서버로 요청 해야하니 필요 client 주입
+    private final ArticleClient articleClient;
+    private final ArticleQueryModelRepository articleQueryModelRepository;
+    private final ArticleIdListRepository articleIdListRepository;  // 게시글 목록 저장
+    private final BoardArticleCountRepository boardArticleCountRepository;  // 게시글 수 저장
+
+
+    // 페이지 번호 방식
+    public ArticleReadPageResponse readAll(Long boardId, Long page, Long pageSize) {
+        return ArticleReadPageResponse.of(
+                readAll(
+                        readAllArticleIds(boardId, page, pageSize)
+                ),
+                count(boardId)
+        );
+    }
+
+    // articleids 를 받아서 ArticleReadResponse 로 변환해서 반환
+    private List<ArticleReadResponse> readAll(List<Long> articleIds) {
+        Map<Long, ArticleQueryModel> articleQueryModelMap = articleQueryModelRepository.readAll(articleIds);
+        return articleIds.stream()
+                .map(articleId -> articleQueryModelMap.containsKey(articleId) ?
+                        articleQueryModelMap.get(articleId) :
+                        fetch(articleId).orElse(null))  //원본데이터
+                .filter(Objects::nonNull)
+                .map(articleQueryModel ->
+                        ArticleReadResponse.from(
+                                articleQueryModel,
+                                viewClient.count(articleQueryModel.getArticleId())
+                        ))
+                .toList();
+    }
+
+    private List<Long> readAllArticleIds(Long boardId, Long page, Long pageSize) {
+        List<Long> articleIds = articleIdListRepository.readAll(boardId, (page - 1) * pageSize, pageSize);
+        if(pageSize == articleIds.size()) {   // 게시글 목록이 전부가 레디스에 저장되있다.
+            log.info("[ArticleReadService.readAllArticleIds] return redis data");
+            return articleIds;
+        }
+        log.info("[ArticleReadService.readAllArticleIds] return origin data");
+        // 원본데이터
+        return articleClient.readAll(boardId, page, pageSize).getArticles().stream()
+                .map(ArticleClient.ArticleResponse::getArticleId)
+                .toList();
+    }
+
+
+    private long count(Long boardId) {
+        Long result = boardArticleCountRepository.read(boardId);
+        if(result != null) {
+            return result;
+        }
+        long count = articleClient.count(boardId);
+        boardArticleCountRepository.createOrUpdate(boardId, count);
+        return count;
+    }
+
+    private List<ArticleReadResponse> readAllInfiniteScroll(Long boardId, Long lastArticleId, Long pageSize) {
+        return readAll(
+                readAllInfiniteScrollArticleIds(boardId, lastArticleId, pageSize)
+        );
+    }
+
+    private List<Long> readAllInfiniteScrollArticleIds(Long boardId, Long lastArticleId, Long pageSize) {
+        List<Long> articleIds = articleIdListRepository.readAllInfiniteScroll(boardId, lastArticleId, pageSize);
+        if(pageSize == articleIds.size()) {
+            log.info("[ArticleReadService.readAllInfiniteScrollArticleIds] return redis data");
+            return articleIds;
+        }
+        log.info("[ArticleReadService.readAllInfiniteScrollArticleIds] return origin data");
+        return articleClient.readAllInfiniteScroll(boardId, lastArticleId, pageSize).stream()
+                .map(ArticleClient.ArticleResponse::getArticleId)
+                .toList();
+    }
+}
+```
+- controller 목록 조회 추가
+```java
+@RestController
+@RequiredArgsConstructor
+public class ArticleReadController {
+    private final ArticleReadService articleReadService;
+
+    @GetMapping("/v1/articles")
+    public ArticleReadPageResponse readAll(
+            @RequestParam("boardId") Long boardId,
+            @RequestParam("page") Long page,
+            @RequestParam("pageSize") Long pageSize
+    ) {
+        return articleReadService.readAll(boardId, page, pageSize);
+    }
+
+    @GetMapping("/v1/articles/infinite-scroll")
+    public List<ArticleReadResponse> readAllInfiniteScroll(
+            @RequestParam("boardId") Long boardId,
+            @RequestParam(value = "lastArticleId", required = false) Long lastArticleId,
+            @RequestParam("pageSize") Long pageSize
+    ) {
+        return articleReadService.readAllInfiniteScroll(boardId, lastArticleId, pageSize);
+    }
+}
+```
+
+<br>
+
+### 11. 게시글 목록 최적화 전략 구현 - 테스트
+___
+- redis 데이터와 원본 데이터 비교
+    - 1000페이지 전은 redis에 저장된 데이터 
+    - 1페이지 일때는 response1은 redis, response2 는 원본데이터다, 3000페이지 일때는 둘다 원본데이터
+```java
+public class ArticleReadApiTest {
+    RestClient articleReadRestClient = RestClient.create("http://localhost:9005");
+    RestClient articleRestClient = RestClient.create("http://localhost:9000");
+
+
+    @Test
+    void readAllTest() {
+        ArticleReadPageResponse response1 = articleReadRestClient.get()
+                .uri("/v1/articles?boardId=%s&page=%s&pageSize=%s".formatted(1L, 3000L, 5))
+                .retrieve()
+                .body(ArticleReadPageResponse.class);
+        System.out.println("response1.getArticleCount = " + response1.getArticleCount());
+        for (ArticleReadResponse article : response1.getArticles()) {
+            System.out.println("article.getArticleId() = " + article.getArticleId());
+        }
+
+        ArticleReadPageResponse response2 = articleRestClient.get()
+                .uri("/v1/articles?boardId=%s&page=%s&pageSize=%s".formatted(1L, 3000L, 5))
+                .retrieve()
+                .body(ArticleReadPageResponse.class);
+        System.out.println("response2.getArticleCount = " + response2.getArticleCount());
+        for (ArticleReadResponse article : response2.getArticles()) {
+            System.out.println("article.getArticleId() = " + article.getArticleId());
+        }
+    }
+
+
+    @Test
+    void readAllInfiniteScrollTest() {
+        List<ArticleReadResponse> responses1 = articleReadRestClient.get()
+//                .uri("/v1/articles/infinite-scroll?boardId=%s&pageSize=%s".formatted(1L, 5L))
+                .uri("/v1/articles/infinite-scroll?boardId=%s&pageSize=%s&lastArticleId=%s".formatted(1L, 5L, 151172446771970048L))
+                .retrieve()
+                .body(new ParameterizedTypeReference<List<ArticleReadResponse>>() {
+                });
+        for (ArticleReadResponse response : responses1) {
+            System.out.println("response.getArticleId() = " + response.getArticleId());
+        }
+
+
+        List<ArticleReadResponse> responses2 = articleRestClient.get()
+//                .uri("/v1/articles/infinite-scroll?boardId=%s&pageSize=%s".formatted(1L, 5L))
+                .uri("/v1/articles/infinite-scroll?boardId=%s&pageSize=%s&lastArticleId=%s".formatted(1L, 5L, 151172446771970048L))
+                .retrieve()
+                .body(new ParameterizedTypeReference<List<ArticleReadResponse>>() {
+                });
+
+        for (ArticleReadResponse response : responses2) {
+            System.out.println("response.getArticleId() = " + response.getArticleId());
+        }
+    }
+}
+```
