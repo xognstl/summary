@@ -16,22 +16,6 @@ ___
 - EntityManagerFactory 생성
 - EntityManager 생성
 
-#### JPA 동작 테스트
-```java
-@SpringBootApplication
-public class JpaMain {
-
-    public static void main(String[] args) {
-        EntityManagerFactory emf = Persistence.createEntityManagerFactory("hello");
-        EntityManager entityManager = emf.createEntityManager();
-        entityManager.close();
-        emf.close();
-
-        SpringApplication.run(JpaMain.class, args);
-    }
-}
-```
-
 #### 테이블 생성
 ```text
 create table Member ( 
@@ -39,4 +23,66 @@ create table Member (
     name varchar(255), 
     primary key (id) 
 );
+```
+
+#### Entity 생성
+- Entity : JPA가 관리할 객체
+```java
+@Entity
+public class Member {
+    @Id
+    private Long id;
+    private String name;
+    //
+}
+```
+- EntityManagerFactory 는 애플리케이션 로딩시점에 하나만 생성
+- Entity Manager : 트랜잭션을 만들때마다 생성 
+- JPA의 모든 데이터 변경은 트랜잭션 안에서 실행
+
+#### JPQL 
+- 객체 지향 SQL , 테이블이 아닌 엔티티 객체를 대상으로 검색
+
+#### JPA CRUD
+```java
+public class JpaMain {
+    public static void main(String[] args) {
+        EntityManagerFactory emf = Persistence.createEntityManagerFactory("hello");
+        EntityManager em = emf.createEntityManager();
+        EntityTransaction tx = em.getTransaction();
+        tx.begin(); // 트랜잭션 시작
+
+        try {
+            // 등록
+            Member member = new Member();
+            member.setId(1L);
+            member.setName("HelloA");
+            em.persist(member); // 저장
+
+            // 조회
+            Member findMember = em.find(Member.class, 1L);
+            System.out.println("findMember = " + findMember.getId());
+
+            // 삭제
+            em.refresh(findMember);
+
+            // 수정
+            findMember.setName("helloJPA");
+
+            List<Member> findMembers = em.createQuery("select m from Member as m", Member.class)
+//                    .setFirstResult(1).setMaxResults(10)    // 페이징
+                    .getResultList();
+            for (Member findMember : findMembers) {
+                System.out.println("findMember.getName() = " + findMember.getName());
+            }
+            tx.commit();
+        }catch (Exception e) {
+            tx.rollback();
+        }finally {
+            em.close();
+        }
+
+        emf.close();
+    }
+}
 ```
