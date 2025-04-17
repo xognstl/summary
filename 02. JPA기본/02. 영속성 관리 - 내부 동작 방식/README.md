@@ -78,7 +78,7 @@ transaction.commit(); // [트랜잭션] 커밋
 ```
 - JDBC 배치처럼 모아뒀다가 commit 되는 순간 한번에 insert SQL을 보낸다.
 - persistence.xml 에 <property name="hibernate.jdbc.batch_size" value="10"/> 에 batch size 수정 가능
-- 
+  
 
 #### 엔티티 수정(변경 감지)
 ```java
@@ -96,4 +96,58 @@ transaction.commit(); // [트랜잭션] 커밋
 //삭제 대상 엔티티 조회
 Member memberA = em.find(Member.class, “memberA");
 em.remove(memberA); //엔티티 삭제
+```
+
+<br>
+
+### 2. 플러시
+___
+- 플러시 : 영속성 컨텍스트의 변경 내용을 DB에 반영, 영속성 컨텍스트의 현재 변경 사항과 DB를 맞추는 작업
+- 플러시 발생 : 변경 감지 -> 수정된 엔티티 쓰기 지연 SQL 저장소에 등록 -> 쿼리를 DB에 전송
+
+#### 플러시 방법
+- em.flush() : 직접호출
+- 트랜잭션 커밋, JPQL 쿼리 실행 : 자동 호출
+
+#### JPQL 쿼리 실행시 플러시가 자동으로 호출되는 이유
+```java
+em.persist(memberA);
+em.persist(memberB);
+em.persist(memberC);
+// 이때 까지 실제 DB에는 쿼리가 날라가지 않는다.
+//중간에 JPQL 실행
+query = em.createQuery("select m from Member m", Member.class); 
+List<Member> members= query.getResultList();
+```
+- 기본모드가 JPQL 쿼리가 싱행시 플러시가 자동으로 호출된다. 그래서 members 에서는 A,B,C 가 조회가 된다.
+
+#### 플러시 옵션
+- em.setFlushMode(FlushModeType.COMMIT)
+- FlushModeType.AUTO : 커밋이나 쿼리를 실행할 때 플러시(기본값)
+- FlushModeType.COMMIT : 커밋할 때만 플러시
+
+#### 플러시는
+- 영속성 컨텍스트를 비우지 않고, 변경내용을 DB에 동기화
+- 트랜잭션이라는 작업 단위가 중요 -> 커밋 직전에만 동기화 하면 된다.
+
+<br>
+
+### 3. 준영속 상태
+___
+- 영속 상태가 되게 하는법 : em.persist, em.find 조회를 하면 영속상태가 된다.
+- 준영속 상태
+    - 영속 상태의 엔티티가 영속성 컨텍스트에서 분리(detached)
+    - 영속성 컨텍스트가 제공하는 기능을 사용 못함(ex. Dirty Checking)
+
+### 준영속 상태로 만드는 방법
+- em.detach(entity) : 특정 엔티티만 준영속 상태로 전환
+- em.clear() : 영속성 컨텍스트를 완전히 초기화
+- em.close() : 영속성 컨텍스트를 종료
+
+```java
+Member member = em.find(Member.class, 150L);
+member.setName("AAA");
+em.detach(member);
+// commit을 해도 update가 되지 않는다.
+tx.commit();
 ```
