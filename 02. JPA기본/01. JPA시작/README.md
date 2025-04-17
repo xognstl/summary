@@ -64,7 +64,7 @@ public class JpaMain {
             System.out.println("findMember = " + findMember.getId());
 
             // 삭제
-            em.refresh(findMember);
+            em.remove(findMember);
 
             // 수정
             findMember.setName("helloJPA");
