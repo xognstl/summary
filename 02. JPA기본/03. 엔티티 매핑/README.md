@@ -46,3 +46,51 @@ ___
 - 제약조건 추가 : @Column(nullable = false)
 - 유니크 제약 조건 추가
 - DDL 생성 기능은 DDL 생성 시 사용되고 JPA 실행 로직에는 영향 X
+
+<br>
+
+### 3. 필드와 컬럼 매핑
+___
+
+#### @Column (컬럼 매핑)
+- name : 필드와 매핑할 테이블의 컬럼 이름 (default : 객체의 필드 이름)
+- insertable, updatable : 등록, 변경 가능 여부 (default : true)
+- nullable : null 값 허용 여부 설정, false로 설정시 not null 제약조건이 붙는다.
+- unique : @Table의 uniqueConstraints와 같지만 한 컬럼에 간단히 유니크 제약조건을 걸 때 사용
+- columnDefinition : DB 컬럼 정보를 직접 줄 수 있다. ex) varchar(100) default ‘EMPTY'
+- length : 문자 길이 제약 조건 (default : 255)
+- precision, scale : BigDecimal 타입에서의 소수점 관련  
+
+#### @Enumerated (enum 타입 매핑)
+- EnumType.ORDINAL : enum 의 순서를 DB 에 저장
+- EnumType.STRING : enum 이름을 DB 에 저장
+- ORDINAL 사용 X => USER, ADMIN 에서 GUEST, USER, ADMIN 로 guest를 앞에 추가하면 guest가 0번이 되는데 기존 데이터는 USER 가 0 이기 떄문에 섞인다. 
+```java
+public enum RoleType {
+    USER, ADMIN
+}
+
+@Enumerated(EnumType.STRING) 
+private RoleType roleType;
+
+Member member = new Member();
+member.setId(1L);
+member.setUsername("A");
+member.setRoleType(RoleType.USER);
+// EnumType.ORDINAL: enum 순서를 데이터베이스에 저장, 위의 코드에서 데이터에 0이 저장된다.
+// EnumType.STRING: enum 이름을 데이터베이스에 저장, 위의 코드에서 데이터에 USER가 저장된다.
+em.persist(member);
+```
+
+#### @Temporal (날짜 타입 매핑)
+- 날짜 타입(java.util.Date, java.util.Calendar)을 매핑할 때 사용
+- LocalDate, LocalDateTime을 사용할 때는 생략 가능
+- TemporalType.DATE : 2023-05-03
+- TemporalType.TIME : 20:16:00
+- TemporalType.TIMESTAMP : 2023-05-03 20:16:00
+
+#### @Lob (BLOB, CLOB 매핑)
+- 지정할 수 있는 속성 X, 매핑하는 필드 타입이 문자면 CLOB, 나머지는 BLOB 매핑
+
+#### @Transient
+- 필드 매핑 X, DB에 저장 조회 X, 메모리상에서 임시로 어떤 값 보관할 때 정도로 사용
