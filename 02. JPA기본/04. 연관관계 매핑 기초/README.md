@@ -101,3 +101,52 @@ em.persist(teamB);
 // 회원1에 새로운 팀B 설정
 member.setTeam(teamB);
 ```
+
+<br>
+
+### 3. 양방향 연관관계와 연관관계의 주인
+___
+
+#### 양방향 매핑
+- Member 객체에서 Team 을 조회 할 수 있지만 Team 에서 Member 를 볼 수 없다.
+```java
+@Entity
+public class Member {
+    @Id @GeneratedValue
+    @Column(name = "MEMBER_ID")
+    private Long id;
+    @Column(name = "USERNAME")
+    private String name;
+    @ManyToOne
+    @JoinColumn(name = "TEAM_ID")
+    private Team team;
+}
+```
+```java
+@Entity
+public class Team {
+    @Id
+    @GeneratedValue
+    @Column(name = "TEAM_ID")
+    private Long id;
+    private String name;
+    @OneToMany(mappedBy = "team")
+    private List<Member> members = new ArrayList<>();
+}
+```
+- Member 객체에서 Team을 조회할 수 있고, Team에서 Member를 조회할 수 있다.
+```java
+Member findMember = em.find(Member.class, member.getId());
+List<Member> members = findMember.getTeam().getMembers();
+
+for (Member member1 : members) {
+    System.out.println("member1.getName() = " + member1.getName());
+}
+```
+
+#### mappedBy
+- 객체는 양방향이라기보단 회원-> 팀 , 팀 -> 회원 형태의 단방향 2개 이고, 테이블은 회원 <-> 팀 처럼 양방향이다.
+- 객체는 둘 중 하나로 외래 키를 관리 해야하는데 두 관계중 하나를 연관관계의 주인으로 지정한다.
+- 연관관계 주인만이 외래 키를 관리(등록, 수정) 할 수 있고, 나머지는 읽기만 가능하다.
+- 주인은 mappedBy 속성을 사용 하지않고 주인이 아닐때만 mappedBy 속성으로 주인을 지정한다.
+- 외래 키가 있는 곳을 주인으로 정해라.(N 쪽이 무조건 주인이 된다.)
