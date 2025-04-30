@@ -100,3 +100,39 @@ em.persist(team);
 @JoinColumn(name="TEAM_ID", insertable=false, updatable=false)
 private Team team;
 ```
+
+<br>
+
+### 4. 일대일 [1:1]
+___
+- 주 테이블이나 대상 테이블 중 외래 키 선택 가능
+- 외래 키에 데이터베이스 유니크 제약조건(다대일에 유니크 제약조건이 추가된것과 같다.)
+- 양방향 매핑 시 주 테이블의 외래 키가 있는 곳이 연관관계의 주인, 반대편은 mappedBy 적용 
+```java
+//Member.class
+@Id @GeneratedValue
+@Column(name = "MEMBER_ID")
+private Long id;
+@Column(name = "USERNAME")
+private String name;
+
+@OneToOne
+@JoinColumn(name = "LOCKER_ID")
+private Locker locker;
+
+//Locker.class
+@Id @GeneratedValue
+private Long id;
+private String name;
+
+@OneToOne(mappedBy = "locker")
+private Member member;  // 일대일 양방향
+```
+- 주 테이블에 외래 키(Member)
+    - 장점: 주 테이블만 조회해도 대상 테이블에 데이터가 있는지 확인 가능
+    - 단점: 값이 없으면 외래 키에 null 허용
+
+- 대상 테이블에 외래 키(Locker)
+    - 장점: 주 테이블과 대상 테이블을 일대일에서 일대다 관계로 변경할 때 테이블 구조 유지
+    - 단점: 프록시 기능의 한계로 지연 로딩으로 설정해도 항상 즉시 로딩됨
+
