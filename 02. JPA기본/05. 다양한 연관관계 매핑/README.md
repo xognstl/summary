@@ -136,3 +136,90 @@ private Member member;  // 일대일 양방향
     - 장점: 주 테이블과 대상 테이블을 일대일에서 일대다 관계로 변경할 때 테이블 구조 유지
     - 단점: 프록시 기능의 한계로 지연 로딩으로 설정해도 항상 즉시 로딩됨
 
+
+<br>
+
+### 5. 다대다 [N:M]
+___
+```java
+@Entity
+public class Product {
+    @Id @GeneratedValue
+    private Long id;
+    private String name;
+    @ManyToMany(mappedBy = "products")
+    private List<Member> members = new ArrayList<>();   // 양방향
+}
+
+@Entity
+public class Member {
+    @Id @GeneratedValue
+    @Column(name = "MEMBER_ID")
+    private Long id;
+    @Column(name = "USERNAME")
+    private String name;
+    @ManyToMany
+    @JoinTable(name = "MEBER_PRODUCT")
+    private List<Product> products = new ArrayList<>();
+}
+```
+- 관계형 데이터베이스는 정규화된 테이블 2개로 다대다 관계를 표현할 수 없음
+- 연결 테이블을 추가해서 일대다, 다대일 관계로 풀어내야함
+- 객체는 컬렉션을 사용해서 객체 2개로 다대다 관계 가능(@ManyToMany 사용, @JoinTable을 사용하여 연결 테이블 지정)
+- 연결 테이블은 자동으로 생성 된다.
+- 중간 테이블에는 매핑 정보만 들어오기 때문에 주문시간, 수량 같은 데이터가 들어오지 못한다. 그래서 다대다는 일대다 다대일 관계로 풀어낸다.
+
+#### 다대다 한계 극복
+- 연결 테이블용 엔티티 추가(연결테이블을 엔티티로 승격)
+- @ManyToMany -> @OneToMany, @ManyToOne
+```java
+//Member.class
+@Entity
+public class Member {
+
+    @Id @GeneratedValue
+    @Column(name = "MEMBER_ID")
+    private Long id;
+    @Column(name = "USERNAME")
+    private String name;
+
+    @OneToOne
+    @JoinColumn(name = "LOCKER_ID")
+    private Locker locker;
+
+    @OneToMany(mappedBy = "member")
+    private List<MemberProduct> memberProducts = new ArrayList<>();
+}
+
+//MemberProduct.class
+@Entity
+public class MemberProduct {
+
+    @Id
+    @GeneratedValue
+    private Long id;
+
+    @ManyToOne
+    @JoinColumn(name = "MEMBER_ID")
+    private Member member;
+
+    @ManyToOne
+    @JoinColumn(name = "PRODUCT_ID")
+    private Product product;
+
+    private int count;
+    private int price;
+    private LocalDateTime orderDateTime;  // 연결 테이블을 엔티티로 만들어서 매핑정보 이외의 컬럼을 넣을 수 있다.
+}
+
+//Product.class
+@Entity
+public class Product {
+    @Id @GeneratedValue
+    private Long id;
+    private String name;
+
+    @OneToMany(mappedBy = "product")
+    private List<MemberProduct> memberProducts = new ArrayList<>();
+}
+```
