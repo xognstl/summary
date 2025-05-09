@@ -136,3 +136,65 @@ Hibernate.initialize(refMember);    //강제 초기화
 ```
 
 <br>
+
+### 2. 즉시 로딩과 지연 로딩
+___
+#### 지연 로딩
+- Member를 조회할때 Team을 함께 조회할 필요가 자주 없을 때 사용
+- 단순히 member 정보만 사용하는 비지니스 로직에 사용(member.getName);
+```java
+@ManyToOne(fetch = FetchType.LAZY)
+@JoinColumn(name = "TEAM_ID")
+private Team team;
+
+Team team = new Team();
+team.setName("teamA");
+em.persist(team);
+
+Member member1 = new Member();
+member1.setName("member1");
+member1.setTeam(team);
+em.persist(member1);
+
+em.flush();
+em.clear();
+
+Member m = em.find(Member.class, member1.getId());
+System.out.println("m = " + m.getTeam().getClass());        // team은 프록시에서 조회
+
+System.out.println("===");
+m.getTeam().getName();      // 실제 team을 사용하는 시점에 DB 조회.(초기화)
+System.out.println("===");
+```
+* team의  fetch를 LAZY로 설정하면 Member 만 DB에서 조회하고, member에 참조되있는 team은 프록시로 조회를 한다.
+
+#### 즉시 로딩
+- Member를 조회할때 Team을 함께 조회할 때 사용
+- 즉시로딩으로 조회를 하면 member와 team을 조인해서 한번에 가져온다.
+
+#### 프록시와 즉시로딩 주의점
+- 가급적 지연 로딩만 사용
+- 즉시 로딩을 적용하면 예상하지 못한 SQL이 발생
+- 즉시 로딩은 JPQL에서 N+1 문제를 일으킨다.
+- @ManyToOne, @OneToOne은 기본이 즉시 로딩 -> LAZY로 설정
+- @OneToMany, @ManyToMany는 기본이 지연 로딩
+
+```java
+List<Member> members = em.createQuery("select m from Member m", Member.class).getResultList();
+// 쿼리가 2번 날라간다.(member, team)
+// 지연로딩으로 바꾸고 fetch join을 사용하여 쿼리가 2개 나가는 것에 대한 것을 해결.
+```
+```text
+n + 1 : member1(teamA), member2(teamB) 이렇게 있으면 
+select * from member => 전체 멤버 가져옴
+select * from team where team_id = teamA
+select * from team where team_id = teamB 
+이런식으로 team을 조회하는 쿼리가 각각나간다. 
+최초 쿼리를 하나를 날렸는데 그것 떄문에 추가 쿼리가 n개가 나간다.
+
+==> N + 1 해결 방법
+- 모든 연관관계를 지연로딩 후
+1. JPQL 페치 조인 : 동적으로 원하는 것을 선택해서 한번에 가져옴
+2. Entity Graph 어노테이션
+3. 배치 사이즈
+```
