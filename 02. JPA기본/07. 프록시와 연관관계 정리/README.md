@@ -203,4 +203,78 @@ select * from team where team_id = teamB
 
 ### 3. 영속성 전이(CASCADE)와 고아 객체
 ___
+- 특정 엔티티를 영속 상태로 만들 때 연관된 엔티티도 함께 영속 상태로 만들도 싶을 때
+- 예: 부모 엔티티를 저장할 때 자식 엔티티도 함께 저장
+- 영속성 전이는 연관관계를 매핑하는 것과 아무 관련이 없음
+- 엔티티를 영속화할 때 연관된 엔티티도 함께 영속화하는 편리함을 제공할 뿐
+- ALL, PERSIST, REMOVE, MERGE, REFRESH, DETACH
 
+
+```java
+@Entity
+public class Parent {
+    @Id @GeneratedValue
+    private Long id;
+    private String name;
+
+    @OneToMany(mappedBy = "parent", cascade = CascadeType.ALL)
+    private List<Child> childList = new ArrayList<>();
+
+    public void addChild (Child child) {
+        childList.add(child);
+        child.setParent(this);
+    }
+}
+@Entity
+public class Child {
+    @Id @GeneratedValue
+    private Long id;
+    private String name;
+
+    @ManyToOne
+    @JoinColumn(name = "parent_id")
+    private Parent parent;
+}
+
+Child child1 = new Child();
+Child child2 = new Child();
+
+Parent parent = new Parent();
+parent.addChild(child1);
+parent.addChild(child2);
+
+em.persist(parent);
+//em.persist(child1);
+//em.persist(child2); //cascade 옵션을 주면 이부분을 써주지 않아도 persist 가 됨.
+```
+
+#### 고아 객체
+- 고아 객체 제거: 부모 엔티티와 연관관계가 끊어진 자식 엔티티를 자동으로 삭제
+- orphanRemoval = true
+
+```java
+Child child1 = new Child();
+Child child2 = new Child();
+
+Parent parent = new Parent();
+parent.addChild(child1);
+parent.addChild(child2);
+
+em.persist(parent);
+em.flush();
+em.clear();
+
+Parent findParent = em.find(Parent.class, parent.getId());
+findParent.getChildList().remove(0);
+```
+- 참조가 제거된 엔티티는 다른 곳에서 참조하지 않는 고아 객체로 보고 삭제하는 기능
+- 참조하는 곳이 하나일 때 사용해야함!
+- 특정 엔티티가 개인 소유할 때 사용
+- @OneToOne, @OneToMany만 가능
+- 참고: 개념적으로 부모를 제거하면 자식은 고아가 된다. 따라서 고아 객체 제거 기능을 활성화 하면, 부모를 제거할 때 자식도 함께 제거된다. 이것은 CascadeType.REMOVE처럼 동작한다.
+
+#### 영속성 전이 + 고아 객체, 생명주기
+- CascadeType.ALL + orphanRemoval=true
+- 스스로 생명주기를 관리하는 엔티티는 em.persist()로 영속화, em.remove()로 제거
+- 두 옵션을 모두 활성화 하면 부모 엔티티를 통해서 자식의 생명주기를 관리할 수 있음
+- 도메인 주도 설계(DDD)의 Aggregate Root개념을 구현할 때 유용
