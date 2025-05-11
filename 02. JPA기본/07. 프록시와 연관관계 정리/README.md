@@ -198,3 +198,9 @@ select * from team where team_id = teamB
 2. Entity Graph 어노테이션
 3. 배치 사이즈
 ```
+
+<br>
+
+### 3. 영속성 전이(CASCADE)와 고아 객체
+___
+
