@@ -22,3 +22,68 @@ ___
 * Integer같은 래퍼 클래스나 String 같은 특수한 클래스는 공유 가능한 객체이지만 변경X
 
 <br>
+
+### 2. 임베디드 타입
+___
+#### 임베디드 타입(복합 값 타입)
+- 새로운 값 타입을 직접 정의할 수 있다. JPA에서는 임베디드 타입(embedded type)이라고 한다.
+- 주로 기본 값 타입을 모아서 만들어서 복합 값 타입이라고도 한다. int, String 같은 값 타입.
+- @Embeddable: 값 타입을 정의하는 곳에 표시
+- @Embedded: 값 타입을 사용하는 곳에 표시
+- 기본 생성자 필수
+
+#### 임베디드 타입의 장점
+- 재사용과 높은 응집도
+- 해당 값 타입만을 사용하는 의미 있는 메소드를 만들 수 있다. ex) Period.isWork()
+- 임베디드 타입을 포함한 모든 값 타입은, 값 타입을 소유한 엔티티에 생명주기를 의존함
+
+```java
+// Member.class
+@Embedded
+private Period workPeriod;
+@Embedded
+private Address homeAddress;
+
+@Embeddable
+public class Address {
+    private String city;
+    private String street;
+    private String zipcode;
+
+    public Address() {}
+    public Address(String city, String street, String zipcode) {
+        this.city = city;
+        this.street = street;
+        this.zipcode = zipcode;
+    }
+}
+
+@Embeddable
+public class Period {
+    private LocalDateTime startDate;
+    private LocalDateTime endDate;
+}
+```
+
+- 임베디드 타입은 엔티티의 값일 뿐이다.
+- 임베디드 타입을 사용하기 전과 후에 매핑하는 테이블은 같다.
+- 객체와 테이블을 아주 세밀하게(find-grained) 매핑하는 것이 가능
+- 잘 설계한 ORM 애플리케이션은 매핑한 테이블의 수보다 클래스의 수가 더 많음
+- 임베디드 타입의 값이 null이면 매핑한 컬럼 값은 모두 null
+
+### AttributeOverride
+- 한 엔티티에서 같은 값 타입을 사용하면 컬럼 명이 중복되므로, @AttributeOverrides, @AttributeOverride를 사용해서 이를 해결(속성을 재정의 한다)
+```java
+@Embedded
+private Address homeAddress;
+
+@Embedded
+@AttributeOverrides({
+        @AttributeOverride(name = "city", column = @Column(name = "WORK_CITY")),
+        @AttributeOverride(name = "street", column = @Column(name = "WORK_STREET")),
+        @AttributeOverride(name = "zipcode", column = @Column(name = "WORK_ZIPCODE"))
+})
+private Address workAddress;
+```
+
+<br>
