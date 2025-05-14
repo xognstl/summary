@@ -87,3 +87,54 @@ private Address workAddress;
 ```
 
 <br>
+
+### 3. 값 타입과 불변 객체
+___
+#### 값 타입 공유 참조
+- 임베디드 타입 같은 값 타입을 여러 엔티티에서 공유하면 부작용(side effect) 발생할 수 있 위험함
+- 회원1, 2가 같은 주소를 보고 있으면 city의 값을 변경하면 같이 변경이 된다.
+```java
+Address address = new Address("city", "street", "1000");
+Member member1 = new Member();
+member1.setName("member1");
+member1.setHomeAddress(address);
+em.persist(member1);
+
+Member member2 = new Member();
+member1.setName("member1");
+member1.setHomeAddress(address);
+em.persist(member2);
+
+member1.getHomeAddress().setCity("newCity");    // member1의 city 만 변경하고 싶은데 실제로 돌려보면 member1,2가 둘다 변경된다.
+```
+
+#### 값 타입 복사
+- 값 타입의 실제 인스턴스 값을 공유하는 것은 위험하고, 대신 값(인스턴스)를 복사해서 사용
+```java
+Address address = new Address("city", "street", "1000");
+Member member1 = new Member();
+member1.setName("member1");
+member1.setHomeAddress(address);
+em.persist(member1);
+
+Address copyAddress = new Address(address.getCity(), address.getStreet(), address.getZipcode());
+Member member2 = new Member();
+member1.setName("member1");
+member1.setHomeAddress(copyAddress);
+em.persist(member2);
+
+member1.getHomeAddress().setCity("newCity");
+
+tx.commit();    // 2번만 변경 된다.
+```
+- 항상 값을 복사해서 사용하면 공유 참조로 인해 발생하는 부작용을 피할 수 있다.
+- 임베디드 타입처럼 직접 정의한 값 타입은 자바의 기본 타입이 아니라 객체 타입이다.
+- 자바 기본 타입에 값을 대입하면 값을 복사한다.
+- 객체 타입은 참조 값을 직접 대입하는 것을 막을 방법이 없다.
+- 객체의 공유 참조는 피할 수 없다.
+
+#### 결론
+- 객체 타입을 수정할 수 없게 만들면 부작용을 원천 차단 할 수 있다. 값 타입은 불변 객체(immutable object)로 설계 해야한다.
+- 생성자로만 값을 설정하고 Setter를 만들지 않으면 된다.
+
+<br>
