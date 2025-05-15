@@ -138,3 +138,58 @@ tx.commit();    // 2번만 변경 된다.
 - 생성자로만 값을 설정하고 Setter를 만들지 않으면 된다.
 
 <br>
+
+### 4. 값 타입 비교
+___
+- 값 타입은 인스턴스가 달라도 그 안에 값이 같으면 같은 것으로 봐야 함
+- 동일성(identity) 비교: 인스턴스의 참조 값을 비교, == 사용
+- 동등성(equivalence) 비교: 인스턴스의 값을 비교, equals() 사용
+- 값 타입은 a.equals(b)를 사용해서 동등성 비교를 해야 함
+- 값 타입의 equals() 메소드를 적절하게 재정의(주로 모든 필드 사용)
+
+```java
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (o == null || getClass() != o.getClass()) return false;
+    Address address = (Address) o;
+    return Objects.equals(city, address.city) && Objects.equals(street, address.street) && Objects.equals(zipcode, address.zipcode);
+} // getter,setter, constructor 만드는 곳의 equals and hascode 이용해서 모든필드로 생성
+```
+
+<br>
+
+### 5. 값 타입 컬렉션
+___
+- 값 타입 컬렉션은 값 타입을 하나 이상 저장할 때 사용한다. @ElementCollection, @CollectionTable 사용   
+  데이터베이스는 컬렉션을 같은 테이블에 저장할 수 없다. 컬렉션을 저장하기 위한 별도의 테이블이 필요함
+```java
+@Embedded
+private Address homeAddress;
+
+@ElementCollection
+@CollectionTable(name = "FAVORITE_FOOD", joinColumns = @JoinColumn(name = "MEMBER_ID"))  // 테이블 명
+@Column(name = "FOOD_NAME")
+private Set<String> favoriteFoods = new HashSet<>();
+
+@ElementCollection
+@CollectionTable(name = "ADDRESS", joinColumns = @JoinColumn(name = "MEMBER_ID"))
+private List<Address> addressHistory = new ArrayList<>();
+```
+
+#### 값 타입 컬렉션 사용
+- 값 타입 저장 예제
+```java
+Member member = new Member();
+member.setName("member1");
+member.setHomeAddress(new Address("homeCity", "street", "10000"));
+
+member.getFavoriteFoods().add("food1");
+member.getFavoriteFoods().add("food2");
+member.getFavoriteFoods().add("food3");
+
+member.getAddressHistory().add(new Address("old1", "street", "10000"));
+member.getAddressHistory().add(new Address("old2", "street", "10000"));
+
+em.persist(member);
+```
