@@ -193,3 +193,75 @@ member.getAddressHistory().add(new Address("old2", "street", "10000"));
 
 em.persist(member);
 ```
+- 값 타입 조회 
+  - 값 타입 컬렉션도 지연로딩 전략 사용
+```java
+System.out.println(" ======================= ");
+Member findMember = em.find(Member.class, member.getId());  // memberid, homeAddress, name 만 조회
+
+List<Address> addressHistory = findMember.getAddressHistory();
+for (Address address : addressHistory) {
+    System.out.println("address = " + address.getCity());   // history address 조회
+}
+
+Set<String> favoriteFoods = findMember.getFavoriteFoods();
+for (String favoriteFood : favoriteFoods) {
+    System.out.println("favoriteFood = " + favoriteFood);   // select favoriteFood
+}
+```
+- 값 타입 수정
+  - 값 타입 컬렉션은 영속성 전에(Cascade) + 고아 객체 제거 기능을 필수로 가진다고 볼 수 있다.
+```java
+Member findMember = em.find(Member.class, member.getId());
+
+//findMember.getHomeAddress().setCity("new City"); // 이렇게 하면 안됨.
+Address a = findMember.getHomeAddress();
+findMember.setHomeAddress(new Address("newCity", a.getStreet(), a.getZipcode()));   // 임베디드 수정
+
+findMember.getFavoriteFoods().remove("치킨");
+findMember.getFavoriteFoods().add("한식");
+
+findMember.getAddressHistory().remove(new Address("old1", "street", "10000")); // equals hascode
+findMember.getAddressHistory().add(new Address("new City1", "street", "10000"));
+// 변경 시 delete 1, insert 2 => 아래 제약사항의 이유 
+```
+#### 값 타입 컬렉션의 제약사항
+- 값 타입은 엔티티와 다르게 식별자 개념이 없다.
+- 값은 변경하면 추적이 어렵다.
+- 값 타입 컬렉션에 변경 사항이 발생하면, 주인 엔티티와 연관된 모든 데이터를 삭제하고, 값 타입 컬렉션에 있는 현재 값을 모두 다시 저장한다.  
+  (2개의 데이터가 있고, 한개를 remove, 한개를 add 하면 모든 데이터를 지우고 나머지 1개와 add한 1개를 insert 2번씩 한다)
+- 값 타입 컬렉션을 매핑하는 테이블은 모든 컬럼을 묶어서 기본키를 구성해야 함: null 입력X, 중복 저장X
+
+#### 값 타입 컬렉션 대안
+- 값 타입 컬렉션 대신에 일대다 관계를 고려
+- 일대다 관계를 위한 엔티티를 만들고, 여기에서 값 타입을 사용
+- 영속성 전이(Cascade) + 고아 객체 제거를 사용해서 값 타입 컬렉션 처럼 사용
+```java
+// Member.class
+@OneToMany(cascade = CascadeType.ALL, orphanRemoval = true)
+@JoinColumn(name = "MEMBER_ID")
+private List<AddressEntity> addressHistory = new ArrayList<>();
+
+// AddressEntity.class
+@Entity
+public class AddressEntity {
+  @Id @GeneratedValue
+  private Long id;
+  private Address address;
+
+  public AddressEntity(String city, String street, String zipcode) {
+    this.address = new Address(city, street, zipcode);
+  }
+
+  public AddressEntity() {}
+
+  public AddressEntity(Address address) {
+    this.address = address;
+  }
+}
+
+System.out.println(" ======================= ");
+Member findMember = em.find(Member.class, member.getId());
+findMember.getAddressHistory().remove(new AddressEntity("old1", "street", "10000"));
+findMember.getAddressHistory().add(new AddressEntity("new City1", "street", "10000"));
+```
