@@ -110,3 +110,88 @@ Member result = em.createQuery("select m from Member m where m.username = ?1", M
 
 System.out.println("singleResult = " + result.getUsername());
 ```
+
+<br>
+
+### 3. 프로젝션
+___
+- SELECT 절에 조회할 대상을 지정하는 것. 
+- 대상은 엔티티, 임베디드 타입, 스칼라 타입(숫자, 문자등 기본 데이터 타입)이 있다. 
+- DISTINCT로 중복 제거로 가능
+```java
+Member member = new Member();
+member.setUsername("member1");
+member.setAge(10);
+em.persist(member);
+
+em.flush();
+em.clear();
+
+// 엔티티 프로젝션
+// 결과가 영속성 컨텍스트에서 관리됨.
+List<Member> result = em.createQuery("select m from Member m", Member.class).getResultList();
+Member findMember = result.get(0);
+findMember.setAge(20);  // 엔티티 프로젝션은 영속성 컨텍스트에서 관리 되므로 값 변경 가능.
+
+// 엔티티 프로젝션
+List<Team> result = em.createQuery("select m.team from Member m", Team.class).getResultList();
+//위의 쿼리는 inner join 이 실행된다. 유지보수 측면에서 좋지 않으니 아래와 같이 쿼리를 짠다.
+List<Team> result = em.createQuery("select t from Member m join m.team t", Team.class).getResultList();
+
+// 임베디드 타입 프로젝션
+List<Address> result = em.createQuery("select o.address from Order o ", Address.class).getResultList();
+// 임베디드 타입은 엔티티가 아니라서 select o.address from Address o 같이 사용할 수 없다.
+
+// 스칼라 타입 프로젝션
+List<Member> result = em.createQuery("select distinct m.username, m.age from Member m ").getResultList();
+```
+
+#### 프로젝션 - 여러 값 조회
+- SELECT m.username, m.age FROM Member m
+- Query 타입 조회, Object[] 타입으로 조회, new 명령어로 조회
+```java
+//Object[] 타입으로 조회
+List resultList = em.createQuery("select distinct m.username, m.age from Member m ").getResultList();
+
+Object o = resultList.get(0);
+Object[] result = (Object[]) o;
+System.out.println("username = " + result[0]);
+System.out.println("age = " + result[1]);
+
+//Object[] 타입으로 조회
+List<Object[]> resultList = em.createQuery("select distinct m.username, m.age from Member m ").getResultList();
+Object[] result = resultList.get(0);
+
+// new 명령어로 조회
+List<MemberDTO> result
+        = em.createQuery("select distinct new jpql.MemberDTO(m.username, m.age) from Member m ", MemberDTO.class).getResultList();
+
+MemberDTO memberDTO = result.get(0);
+System.out.println("memberDTO.getUsername() = " + memberDTO.getUsername());
+System.out.println("memberDTO.getUsername() = " + memberDTO.getAge());
+
+//MemberDTO.class
+public class MemberDTO {
+
+    private String username;
+    private int age;
+
+    public MemberDTO(String username, int age) {
+        this.username = username;
+        this.age = age;
+    }
+}    
+```
+
+<br>
+
+### 4. 페이징
+___
+- setFirstResult(int startPosition) : 조회 시작 위치(0부터 시작)
+- setMaxResults(int maxResult) : 조회할 데이터 수
+```java
+List<Member> result = em.createQuery("select m from Member m order by m.age desc", Member.class)
+                    .setFirstResult(0)
+                    .setMaxResults(10)
+                    .getResultList();
+```
