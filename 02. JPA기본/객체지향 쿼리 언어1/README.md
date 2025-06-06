@@ -273,3 +273,109 @@ where m.team = ANY (select t from Team t);
 - FROM절의 서브 쿼리는 하이버네이트6 부터 가능(JOIN이나 어플리케이션에서 처리)
 
 <br>
+
+### 7.JPQL 타입 표현과 기타식
+___
+#### JPQL 타입 표현
+- 문자 : ‘HELLO’, ‘She’’s’
+- 숫자 : 10L(Long), 10D(Double), 10F(Float)
+- Boolean : TRUE, FALSE
+- ENUM : jpabook.MemberType.Admin (패키지명 포함)
+- 엔티티 타입 : TYPE(m) = Member (상속 관계에서 사용)
+
+```java
+//            em.createQuery("select m.username, 'HELLO',TRUE from Member m" +
+//                    " where m.type = jpql.MemberType.USER").getResultList();
+// Enum 에 패키지 명을 포함시키기 지저분하니 파라미터 바인딩으로 해결.
+em.createQuery("select m.username, 'HELLO',TRUE from Member m" +
+        " where m.type = :userType")
+        .setParameter("userType", MemberType.USER).getResultList();
+
+// 엔티티 타입
+em.createQuery("select i from Item i where type(i) = Book", Item.class).getResultList();
+```
+#### JPQL 기타
+- SQL과 문법이 같은 식
+- EXISTS, IN
+- AND, OR, NOT
+- =, >, >=, <, <=, <>
+- BETWEEN, LIKE, IS NULL
+
+<br>
+
+### 8. 조건식(CASE 등등)
+___
+#### 조건식 - CASE 식
+```sql
+-- 기본 case 식
+select
+    case when m.age <= 10 then '학생요금'
+         when m.age >= 60 then '경로요금'
+         else '일반요금'
+        end
+from Member m;
+
+-- 단순 case 식
+select
+ case t.name 
+ when '팀A' then '인센티브110%'
+ when '팀B' then '인센티브120%'
+ else '인센티브105%'
+ end
+from Team t;
+```
+
+- COALESCE: 하나씩 조회해서 null이 아니면 반환
+- NULLIF: 두 값이 같으면 null 반환, 다르면 첫번째 값 반환
+
+```sql
+-- 사용자 이름이 없으면 이름 없는 회원을 반환
+select coalesce(m.username,'이름 없는 회원') from Member m;
+
+-- 사용자이름이 관리자 이면 null 반환, 아니면 본인 이름 반환
+select NULLIF(m.username, '관리자') from Member m;
+```
+
+<br>
+
+### 9. JPQL 함수
+___
+#### JPQL 기본 함수
+- CONCAT : concat('a','b') || 도 사용가능
+- SUBSTRING
+- TRIM : 공백제거
+- LOWER, UPPER : 대소문자
+- LENGTH : 문자의 길이
+- LOCATE : ex) locate('de', 'abcdef') => 4
+- ABS, SQRT, MOD
+- SIZE, INDEX(JPA 용도)
+
+#### 사용자 정의 함수 호출
+- 하이버네이트는 사용전 방언에 추가해야 한다.
+- 사용하는 DB 방언을 상속받고, 사용자 정의 함수를 등록한다
+
+```java
+public class MyH2Dialect extends H2Dialect {
+
+    public MyH2Dialect() {
+        registerFunction("group_concat", new StandardSQLFunction("group_concat", StandardBasicTypes.STRING));
+    }
+
+}
+```
+```xml
+<!--persistence.xml-->
+<property name="hibernate.dialect" value="dialect.MyH2Dialect"/>
+```
+
+```java
+String query = "select function('group_concat', m.username) from Member m";
+//group_concat(m.username) 으로 사용가능
+
+List<String> resultList = em.createQuery(query, String.class).getResultList();
+
+for (String s : resultList) {
+    System.out.println("s = " + s);
+}
+```
+
